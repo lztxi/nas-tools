@@ -3,12 +3,18 @@ import re
 
 from lxml import etree
 
-from app.sites.siteuserinfo.site_user_info import ISiteUserInfo
+from app.sites.siteuserinfo._base import _ISiteUserInfo, SITE_BASE_ORDER
 from app.utils import StringUtils
+from app.utils.types import SiteSchema
 
 
-class SmallHorseSiteUserInfo(ISiteUserInfo):
-    _site_schema = "Small Horse"
+class SmallHorseSiteUserInfo(_ISiteUserInfo):
+    schema = SiteSchema.SmallHorse
+    order = SITE_BASE_ORDER + 30
+
+    @classmethod
+    def match(cls, html_text):
+        return 'Small Horse' in html_text
 
     def _parse_site_page(self, html_text):
         html_text = self._prepare_html_text(html_text)
@@ -18,9 +24,6 @@ class SmallHorseSiteUserInfo(ISiteUserInfo):
             self._user_detail_page = user_detail.group().strip().lstrip('/')
             self.userid = user_detail.group(1)
         self._user_traffic_page = f"user.php?id={self.userid}"
-
-        if not self.userid:
-            self.err_msg = "获取不到用户信息，请检查cookies是否过期"
 
     def _parse_user_base_info(self, html_text):
         html_text = self._prepare_html_text(html_text)
@@ -40,12 +43,12 @@ class SmallHorseSiteUserInfo(ISiteUserInfo):
         tmps = html.xpath('//ul[@class = "stats nobullet"]')
         if tmps:
             if tmps[1].xpath("li") and tmps[1].xpath("li")[0].xpath("span//text()"):
-                self.join_at = str(tmps[1].xpath("li")[0].xpath("span//text()")[0])
+                self.join_at = StringUtils.unify_datetime_str(tmps[1].xpath("li")[0].xpath("span//text()")[0])
             self.upload = StringUtils.num_filesize(str(tmps[1].xpath("li")[2].xpath("text()")[0]).split(":")[1].strip())
             self.download = StringUtils.num_filesize(
                 str(tmps[1].xpath("li")[3].xpath("text()")[0]).split(":")[1].strip())
             if tmps[1].xpath("li")[4].xpath("span//text()"):
-                self.ratio = StringUtils.str_float(str(tmps[1].xpath("li")[4].xpath("span//text()")[0]))
+                self.ratio = StringUtils.str_float(str(tmps[1].xpath("li")[4].xpath("span//text()")[0]).replace('∞', '0'))
             else:
                 self.ratio = StringUtils.str_float(str(tmps[1].xpath("li")[5].xpath("text()")[0]).split(":")[1])
             self.bonus = StringUtils.str_float(str(tmps[1].xpath("li")[5].xpath("text()")[0]).split(":")[1])

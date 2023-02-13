@@ -4,12 +4,24 @@ import re
 from lxml import etree
 
 import log
-from app.sites.siteuserinfo.site_user_info import ISiteUserInfo
+from app.sites.siteuserinfo._base import _ISiteUserInfo, SITE_BASE_ORDER
 from app.utils import StringUtils
+from app.utils.exception_utils import ExceptionUtils
+from app.utils.types import SiteSchema
 
 
-class NexusPhpSiteUserInfo(ISiteUserInfo):
-    _site_schema = "NexusPhp"
+class NexusPhpSiteUserInfo(_ISiteUserInfo):
+    schema = SiteSchema.NexusPhp
+    order = SITE_BASE_ORDER * 2
+
+    @classmethod
+    def match(cls, html_text):
+        """
+        默认使用NexusPhp解析
+        :param html_text:
+        :return:
+        """
+        return True
 
     def _parse_site_page(self, html_text):
         html_text = self._prepare_html_text(html_text)
@@ -25,16 +37,6 @@ class NexusPhpSiteUserInfo(ISiteUserInfo):
                 self._user_detail_page = user_detail.group().strip().lstrip('/')
                 self.userid = None
                 self._torrent_seeding_page = None
-
-        html = etree.HTML(html_text)
-        if not html:
-            self.err_msg = "未检测到已登陆，请检查cookies是否过期"
-            return
-
-        logout = html.xpath('//a[contains(@href, "logout") or contains(@data-url, "logout")'
-                            ' or contains(@onclick, "logout") or contains(@href, "usercp")]')
-        if not logout:
-            self.err_msg = "未检测到已登陆，请检查cookies是否过期"
 
     def _parse_message_unread(self, html_text):
         """
@@ -66,22 +68,24 @@ class NexusPhpSiteUserInfo(ISiteUserInfo):
         html = etree.HTML(html_text)
         if not html:
             return
+
+        ret = html.xpath(f'//a[contains(@href, "userdetails") and contains(@href, "{self.userid}")]//b//text()')
+        if ret:
+            self.username = str(ret[0])
+            return
+        ret = html.xpath(f'//a[contains(@href, "userdetails") and contains(@href, "{self.userid}")]//text()')
+        if ret:
+            self.username = str(ret[0])
+
         ret = html.xpath('//a[contains(@href, "userdetails")]//strong//text()')
         if ret:
             self.username = str(ret[0])
             return
 
-        ret = html.xpath('//a[contains(@href, "userdetails")]//b//text()')
-        if ret:
-            self.username = str(ret[0])
-            return
-        ret = html.xpath('//a[contains(@href, "userdetails")]//text()')
-        if ret:
-            self.username = str(ret[0])
-
     def __parse_user_traffic_info(self, html_text):
         html_text = self._prepare_html_text(html_text)
-        upload_match = re.search(r"[^总]上[传傳]量?[:：_<>/a-zA-Z-=\"'\s#;]+([\d,.\s]+[KMGTPI]*B)", html_text, re.IGNORECASE)
+        upload_match = re.search(r"[^总]上[传傳]量?[:：_<>/a-zA-Z-=\"'\s#;]+([\d,.\s]+[KMGTPI]*B)", html_text,
+                                 re.IGNORECASE)
         self.upload = StringUtils.num_filesize(upload_match.group(1).strip()) if upload_match else 0
         download_match = re.search(r"[^总子影力]下[载載]量?[:：_<>/a-zA-Z-=\"'\s#;]+([\d,.\s]+[KMGTPI]*B)", html_text,
                                    re.IGNORECASE)
@@ -114,7 +118,7 @@ class NexusPhpSiteUserInfo(ISiteUserInfo):
             if bonus_match and bonus_match.group(1).strip():
                 self.bonus = StringUtils.str_float(bonus_match.group(1))
         except Exception as err:
-            print(str(err))
+            ExceptionUtils.exception_traceback(err)
 
     def _parse_user_traffic_info(self, html_text):
         """
@@ -138,13 +142,13 @@ class NexusPhpSiteUserInfo(ISiteUserInfo):
         size_col = 3
         seeders_col = 4
         # 搜索size列
-        if html.xpath('//tr[position()=1]/td[img[@class="size"] and img[@alt="size"]]'):
-            size_col = len(html.xpath('//tr[position()=1]/td[img[@class="size"] '
-                                      'and img[@alt="size"]]/preceding-sibling::td')) + 1
+        size_col_xpath = '//tr[position()=1]/td[(img[@class="size"] and img[@alt="size"]) or (text() = "大小")]'
+        if html.xpath(size_col_xpath):
+            size_col = len(html.xpath(f'{size_col_xpath}/preceding-sibling::td')) + 1
         # 搜索seeders列
-        if html.xpath('//tr[position()=1]/td[img[@class="seeders"] and img[@alt="seeders"]]'):
-            seeders_col = len(html.xpath('//tr[position()=1]/td[img[@class="seeders"] '
-                                         'and img[@alt="seeders"]]/preceding-sibling::td')) + 1
+        seeders_col_xpath = '//tr[position()=1]/td[(img[@class="seeders"] and img[@alt="seeders"]) or (text() = "在做种")]'
+        if html.xpath(seeders_col_xpath):
+            seeders_col = len(html.xpath(f'{seeders_col_xpath}/preceding-sibling::td')) + 1
 
         page_seeding = 0
         page_seeding_size = 0
@@ -170,6 +174,9 @@ class NexusPhpSiteUserInfo(ISiteUserInfo):
         next_page_text = html.xpath('//a[contains(.//text(), "下一页") or contains(.//text(), "下一頁")]/@href')
         if next_page_text:
             next_page = next_page_text[-1].strip()
+            # fix up page url
+            if self.userid not in next_page:
+                next_page = f'{next_page}&userid={self.userid}&type=seeding'
 
         return next_page
 

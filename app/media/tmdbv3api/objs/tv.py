@@ -28,11 +28,12 @@ class TV(TMDb):
         "season_details": "/tv/%s/season/%s",
         "alternative_titles": "/tv/%s/alternative_titles",
         "credits": "/tv/%s/credits",
-        "discover": "/discover/tv"
+        "discover": "/discover/tv",
+        "images": "/tv/%s/images"
     }
 
     def details(
-            self, show_id, append_to_response="videos,trailers,images,credits,alternative_titles,translations,external_ids"
+            self, show_id, append_to_response=""
     ):
         """
         Get the primary TV show details by id.
@@ -40,6 +41,10 @@ class TV(TMDb):
         :param append_to_response:
         :return:
         """
+        if append_to_response == "all":
+            append_to_response = "images,credits,alternative_titles,translations,external_ids"
+        elif append_to_response is None:
+            append_to_response = "alternative_titles,translations,external_ids"
         return AsObj(
             **self._call(
                 self._urls["details"] % str(show_id),
@@ -222,3 +227,15 @@ class TV(TMDb):
         :return:
         """
         return AsObj(**self._call(self._urls["discover"], "page=" + str(page)))
+
+    def images(self, tv_id, include_image_language=""):
+        """
+        Get the images that belong to a movie.
+        Querying images with a language parameter will filter the results.
+        If you want to include a fallback language (especially useful for backdrops) you can use the include_image_language parameter.
+        This should be a comma seperated value like so: include_image_language=en,null.
+        :param tv_id:
+        :param include_image_language:
+        :return:
+        """
+        return AsObj(**self._call(self._urls['images'] % tv_id, "include_image_language=" + include_image_language))

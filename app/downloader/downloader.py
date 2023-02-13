@@ -1,27 +1,31 @@
 import os
 from threading import Lock
-from time import sleep
 
 import log
-from app.helper import DbHelper
-from app.media import MetaInfo, Media
-from config import Config, PT_TAG, RMT_MEDIAEXT
-from app.message import Message
-from app.downloader import Aria2, Client115, Qbittorrent, Transmission
-from app.mediaserver import MediaServer
-from app.sites import Sites
-from app.utils import Torrent, StringUtils, SystemUtils
+from app.conf import ModuleConf
 from app.filetransfer import FileTransfer
-from app.utils.types import MediaType, DownloaderType, SearchType, RmtMode, RMT_MODES
+from app.helper import DbHelper, ThreadHelper, SubmoduleHelper
+from app.media import Media
+from app.media.meta import MetaInfo
+from app.mediaserver import MediaServer
+from app.message import Message
+from app.sites import Sites
+from app.subtitle import Subtitle
+from app.conf import SystemConfig
+from app.utils import Torrent, StringUtils, SystemUtils, ExceptionUtils
+from app.utils.commons import singleton
+from app.utils.types import MediaType, DownloaderType, SearchType, RmtMode
+from config import Config, PT_TAG, RMT_MEDIAEXT
 
 lock = Lock()
 client_lock = Lock()
 
 
+@singleton
 class Downloader:
-    _client = None
-    _client_type = None
-    _seeding_time = None
+    clients = {}
+    _downloader_schema = []
+    _default_client_type = None
     _pt_monitor_only = None
     _download_order = None
     _pt_rmt_mode = None
@@ -34,91 +38,91 @@ class Downloader:
     media = None
     sites = None
     dbhelper = None
+    systemconfig = None
 
     def __init__(self):
+        self._downloader_schema = SubmoduleHelper.import_submodules(
+            'app.downloader.client',
+            filter_func=lambda _, obj: hasattr(obj, 'schema')
+        )
+        log.debug(f"【Downloader】加载下载器：{self._downloader_schema}")
+        self.init_config()
+
+    def init_config(self):
+        self.dbhelper = DbHelper()
         self.message = Message()
         self.mediaserver = MediaServer()
         self.filetransfer = FileTransfer()
         self.media = Media()
         self.sites = Sites()
-        self.dbhelper = DbHelper()
-        self.init_config()
-
-    def init_config(self):
-        config = Config()
+        self.systemconfig = SystemConfig()
         # 下载器配置
-        pt = config.get_config('pt')
+        pt = Config().get_config('pt')
         if pt:
-            pt_client = pt.get('pt_client')
-            if pt_client == "qbittorrent":
-                self._client_type = DownloaderType.QB
-            elif pt_client == "transmission":
-                self._client_type = DownloaderType.TR
-            elif pt_client == "client115":
-                self._client_type = DownloaderType.Client115
-            elif pt_client == "aria2":
-                self._client_type = DownloaderType.Aria2
-            self._seeding_time = pt.get('pt_seeding_time')
-            if self._seeding_time:
-                try:
-                    self._seeding_time = round(float(self._seeding_time) * 24 * 3600)
-                except Exception as e:
-                    log.error("【pt.pt_seeding_time 格式错误：%s" % str(e))
-                    self._seeding_time = None
+            self._default_client_type = ModuleConf.DOWNLOADER_DICT.get(pt.get('pt_client')) or DownloaderType.QB
             self._pt_monitor_only = pt.get("pt_monitor_only")
             self._download_order = pt.get("download_order")
-            self._pt_rmt_mode = RMT_MODES.get(pt.get("rmt_mode", "copy"), RmtMode.COPY)
+            self._pt_rmt_mode = ModuleConf.RMT_MODES.get(pt.get("rmt_mode", "copy"), RmtMode.COPY)
         # 下载目录配置
-        self._downloaddir = config.get_config('downloaddir') or []
+        self._downloaddir = Config().get_config('downloaddir') or []
         # 下载设置
-        self._download_setting = {"-1": {
-            "id": -1,
-            "name": "默认",
-            "category": '',
-            "tags": 'NASTOOL',
-            "content_layout": 0,
-            "is_paused": 0,
-            "upload_limit": 0,
-            "download_limit": 0,
-            "ratio_limit": 0,
-            "seeding_time_limit": 0}}
+        self._download_setting = {
+            "-1": {
+                "id": -1,
+                "name": "预设",
+                "category": '',
+                "tags": PT_TAG,
+                "content_layout": 0,
+                "is_paused": 0,
+                "upload_limit": 0,
+                "download_limit": 0,
+                "ratio_limit": 0,
+                "seeding_time_limit": 0,
+                "downloader": ""}
+        }
         download_settings = self.dbhelper.get_download_setting()
         for download_setting in download_settings:
             self._download_setting[str(download_setting.ID)] = {
-                        "id": download_setting.ID,
-                        "name": download_setting.NAME,
-                        "category": download_setting.CATEGORY,
-                        "tags": download_setting.TAGS,
-                        "content_layout": download_setting.CONTENT_LAYOUT,
-                        "is_paused": download_setting.IS_PAUSED,
-                        "upload_limit": download_setting.UPLOAD_LIMIT,
-                        "download_limit": download_setting.DOWNLOAD_LIMIT,
-                        "ratio_limit": download_setting.RATIO_LIMIT/100,
-                        "seeding_time_limit": download_setting.SEEDING_TIME_LIMIT}
+                "id": download_setting.ID,
+                "name": download_setting.NAME,
+                "category": download_setting.CATEGORY,
+                "tags": download_setting.TAGS,
+                "content_layout": download_setting.CONTENT_LAYOUT,
+                "is_paused": download_setting.IS_PAUSED,
+                "upload_limit": download_setting.UPLOAD_LIMIT,
+                "download_limit": download_setting.DOWNLOAD_LIMIT,
+                "ratio_limit": download_setting.RATIO_LIMIT / 100,
+                "seeding_time_limit": download_setting.SEEDING_TIME_LIMIT,
+                "downloader": download_setting.DOWNLOADER}
+
+    def __build_class(self, ctype, conf=None):
+        for downloader_schema in self._downloader_schema:
+            try:
+                if downloader_schema.match(ctype):
+                    return downloader_schema(conf)
+            except Exception as e:
+                ExceptionUtils.exception_traceback(e)
+        return None
 
     @property
-    def client(self):
-        with client_lock:
-            if not self._client:
-                self._client = self.__get_client()
-            return self._client
+    def default_client(self):
+        return self.__get_client(self._default_client_type)
 
-    def __get_client(self):
-        if self._client_type == DownloaderType.TR:
-            return Transmission()
-        elif self._client_type == DownloaderType.Client115:
-            return Client115()
-        elif self._client_type == DownloaderType.Aria2:
-            return Aria2()
-        else:
-            return Qbittorrent()
+    def __get_client(self, ctype: DownloaderType, conf: dict = None):
+        if not ctype:
+            return None
+        with client_lock:
+            if not self.clients.get(ctype.value):
+                self.clients[ctype.value] = self.__build_class(ctype.value, conf)
+            return self.clients.get(ctype.value)
 
     def download(self,
                  media_info,
                  is_paused=None,
                  tag=None,
                  download_dir=None,
-                 download_setting=None):
+                 download_setting=None,
+                 torrent_file=None):
         """
         添加下载任务，根据当前使用的下载器分别调用不同的客户端处理
         :param media_info: 需下载的媒体信息，含URL地址
@@ -126,72 +130,84 @@ class Downloader:
         :param tag: 种子标签
         :param download_dir: 指定下载目录
         :param download_setting: 下载设置id
+        :param torrent_file: 种子文件路径
+        :return: 种子或状态，错误信息
         """
-        if not self.client:
-            return None, "下载器初始化失败"
-        # 下载链接
-        url = media_info.enclosure
-        if not url:
-            return None, "Url链接为空"
         # 标题
         title = media_info.org_string
-        # 详情面羰
+        # 详情页面
         page_url = media_info.page_url
-        # 转换链接
-        _xpath = None
-        _hash = False
-        if url.startswith("["):
-            _xpath = url[1:-1]
-            url = page_url
-        elif url.startswith("#"):
-            _xpath = url[1:-1]
-            _hash = True
-            url = page_url
-        if not url:
-            return None, "Url链接为空"
-        # 获取种子内容，磁力链不解析
-        if url.startswith("magnet:"):
-            content = url
-        # 这些下载器不解析
-        elif self._client_type in [DownloaderType.Client115]:
-            content = url
-        # HTTP协议偿试下载种子内容
-        elif url.startswith("http"):
-            # 获取Cookie和ua等
-            cookie, ua, referer = self.sites.get_site_attr(url)
-            if _xpath:
-                # 从详情页面解析下载链接
-                url = self.sites.parse_site_download_url(page_url=url,
-                                                         xpath=_xpath,
-                                                         cookie=cookie,
-                                                         ua=ua)
-                if not url:
-                    return None, "无法从详情页面：%s 解析出下载链接" % page_url
-                # 解析出来的是HASH值
-                if _hash:
-                    # 转换为磁力链
-                    url = Torrent.convert_hash_to_magnet(hash_text=url, title=title)
-                    if not url:
-                        return None, "%s 转换磁力链失败" % url
-            # 下载种子文件
-            content, retmsg = Torrent.get_torrent_content(url=url,
-                                                          cookie=cookie,
-                                                          ua=ua,
-                                                          referer=page_url if referer else None)
-            if not content:
-                return None, retmsg
+        # 默认值
+        _xpath, _hash, site_info, dl_files_folder, dl_files, retmsg = None, False, {}, "", [], ""
+        # 有种子文件时解析种子信息
+        if torrent_file:
+            url = os.path.basename(torrent_file)
+            content, dl_files_folder, dl_files, retmsg = Torrent().read_torrent_content(torrent_file)
+        # 没有种子文件解析链接
         else:
-            content = url
+            url = media_info.enclosure
+            if not url:
+                return None, "下载链接为空"
+            # 获取种子内容，磁力链不解析
+            if url.startswith("magnet:"):
+                content = url
+            else:
+                # [XPATH]为需从详情页面解析磁力链
+                if url.startswith("["):
+                    _xpath = url[1:-1]
+                    url = page_url
+                # #XPATH#为需从详情页面解析磁力Hash
+                elif url.startswith("#"):
+                    _xpath = url[1:-1]
+                    _hash = True
+                    url = page_url
+                # 从详情页面XPATH解析下载链接
+                if _xpath:
+                    content = self.sites.parse_site_download_url(page_url=url,
+                                                                 xpath=_xpath)
+                    if not content:
+                        return None, "无法从详情页面：%s 解析出下载链接" % url
+                    # 解析出磁力链，补充Trackers
+                    if content.startswith("magnet:"):
+                        content = Torrent.add_trackers_to_magnet(url=content, title=title)
+                    # 解析出来的是HASH值，转换为磁力链
+                    elif _hash:
+                        content = Torrent.convert_hash_to_magnet(hash_text=content, title=title)
+                        if not content:
+                            return None, "%s 转换磁力链失败" % content
+                # 从HTTP链接下载种子
+                else:
+                    # 获取Cookie和ua等
+                    site_info = self.sites.get_site_attr(url)
+                    # 下载种子文件，并读取信息
+                    _, content, dl_files_folder, dl_files, retmsg = Torrent().get_torrent_info(
+                        url=url,
+                        cookie=site_info.get("cookie"),
+                        ua=site_info.get("ua"),
+                        referer=page_url if site_info.get("referer") else None,
+                        proxy=site_info.get("proxy")
+                    )
+        # 解析完成
+        if retmsg:
+            log.warn("【Downloader】%s" % retmsg)
+        if not content:
+            return None, retmsg
+
+        # 下载设置
+        if not download_setting and media_info.site:
+            download_setting = self.sites.get_site_download_setting(media_info.site)
+        if download_setting:
+            download_attr = self.get_download_setting(download_setting) \
+                            or self.get_download_setting(self.get_default_download_setting())
+        else:
+            download_attr = self.get_download_setting(self.get_default_download_setting())
+        # 下载器类型
+        dl_type = self.__get_client_type(download_attr.get("downloader")) or self._default_client_type
+        # 下载器客户端
+        downloader = self.__get_client(dl_type)
 
         # 开始添加下载
         try:
-            # 下载设置
-            if download_setting:
-                download_attr = self.get_download_setting(download_setting)
-                if not download_attr:
-                    download_attr = self.get_download_setting(-1)
-            else:
-                download_attr = self.get_download_setting(-1)
             # 分类
             category = download_attr.get("category")
             # 合并TAG
@@ -234,42 +250,67 @@ class Downloader:
                 if not category:
                     category = download_label
             # 添加下载
-            log.info("【Downloader】添加下载任务：%s，目录：%s，Url：%s" % (title, download_dir, url))
-            if self._client_type == DownloaderType.TR:
-                ret = self.client.add_torrent(content,
-                                              is_paused=is_paused,
-                                              download_dir=download_dir)
+            print_url = content if isinstance(content, str) else url
+            if is_paused:
+                log.info("【Downloader】添加下载任务并暂停：%s，目录：%s，Url：%s" % (title, download_dir, print_url))
+            else:
+                log.info("【Downloader】添加下载任务：%s，目录：%s，Url：%s" % (title, download_dir, print_url))
+            if dl_type == DownloaderType.TR:
+                ret = downloader.add_torrent(content,
+                                             is_paused=is_paused,
+                                             download_dir=download_dir,
+                                             cookie=site_info.get("cookie"))
                 if ret:
-                    self.client.change_torrent(tid=ret.id,
-                                               tag=tags,
-                                               upload_limit=upload_limit,
-                                               download_limit=download_limit,
-                                               ratio_limit=ratio_limit,
-                                               seeding_time_limit=seeding_time_limit)
-            elif self._client_type == DownloaderType.QB:
-                ret = self.client.add_torrent(content,
-                                              is_paused=is_paused,
-                                              download_dir=download_dir,
+                    downloader.change_torrent(tid=ret.id,
                                               tag=tags,
-                                              category=category,
-                                              content_layout=content_layout,
                                               upload_limit=upload_limit,
                                               download_limit=download_limit,
                                               ratio_limit=ratio_limit,
                                               seeding_time_limit=seeding_time_limit)
+            elif dl_type == DownloaderType.QB:
+                ret = downloader.add_torrent(content,
+                                             is_paused=is_paused,
+                                             download_dir=download_dir,
+                                             tag=tags,
+                                             category=category,
+                                             content_layout=content_layout,
+                                             upload_limit=upload_limit,
+                                             download_limit=download_limit,
+                                             ratio_limit=ratio_limit,
+                                             seeding_time_limit=seeding_time_limit,
+                                             cookie=site_info.get("cookie"))
             else:
-                ret = self.client.add_torrent(content,
-                                              is_paused=is_paused,
-                                              tag=tags,
-                                              download_dir=download_dir,
-                                              category=category)
+                ret = downloader.add_torrent(content,
+                                             is_paused=is_paused,
+                                             tag=tags,
+                                             download_dir=download_dir,
+                                             category=category)
+            # 添加下载成功
             if ret:
                 # 登记下载历史
                 self.dbhelper.insert_download_history(media_info)
+                # 下载站点字幕文件
+                if page_url \
+                        and download_dir \
+                        and dl_files \
+                        and site_info \
+                        and site_info.get("subtitle"):
+                    # 下载访问目录
+                    visit_dir = self.get_download_visit_dir(download_dir)
+                    if visit_dir:
+                        if dl_files_folder:
+                            subtitle_dir = os.path.join(visit_dir, dl_files_folder)
+                        else:
+                            subtitle_dir = visit_dir
+                        ThreadHelper().start_thread(
+                            Subtitle().download_subtitle_from_site,
+                            (media_info, site_info.get("cookie"), site_info.get("ua"), subtitle_dir)
+                        )
                 return ret, ""
             else:
                 return ret, "请检查下载任务是否已存在"
         except Exception as e:
+            ExceptionUtils.exception_traceback(e)
             log.error("【Downloader】添加下载任务出错：%s" % str(e))
             return None, str(e)
 
@@ -277,74 +318,81 @@ class Downloader:
         """
         转移下载完成的文件，进行文件识别重命名到媒体库目录
         """
-        if self.client:
+        if self.default_client:
             try:
                 lock.acquire()
                 if self._pt_monitor_only:
                     tag = [PT_TAG]
                 else:
                     tag = None
-                trans_tasks = self.client.get_transfer_task(tag=tag)
+                trans_tasks = self.default_client.get_transfer_task(tag=tag)
                 if trans_tasks:
                     log.info("【Downloader】开始转移下载文件...")
                 else:
                     return
                 for task in trans_tasks:
-                    done_flag, done_msg = self.filetransfer.transfer_media(in_from=self._client_type,
+                    done_flag, done_msg = self.filetransfer.transfer_media(in_from=self._default_client_type,
                                                                            in_path=task.get("path"),
                                                                            rmt_mode=self._pt_rmt_mode)
                     if not done_flag:
                         log.warn("【Downloader】%s 转移失败：%s" % (task.get("path"), done_msg))
-                        self.client.set_torrents_status(task.get("id"))
+                        self.default_client.set_torrents_status(ids=task.get("id"),
+                                                                tags=task.get("tags"))
                     else:
                         if self._pt_rmt_mode in [RmtMode.MOVE, RmtMode.RCLONE, RmtMode.MINIO]:
                             log.warn("【Downloader】移动模式下删除种子文件：%s" % task.get("id"))
-                            self.delete_torrents(task.get("id"))
+                            self.default_client.delete_torrents(delete_file=True, ids=task.get("id"))
                         else:
-                            self.client.set_torrents_status(task.get("id"))
+                            self.default_client.set_torrents_status(ids=task.get("id"),
+                                                                    tags=task.get("tags"))
                 log.info("【Downloader】下载文件转移结束")
             finally:
                 lock.release()
 
-    def remove_torrents(self):
+    def get_remove_torrents(self, downloader=None, config=None):
         """
-        做种清理，保种时间为空或0时，不进行清理操作
+        查询符合删种策略的种子信息
+        :return: 符合删种策略的种子信息列表
         """
-        if not self.client:
-            return False
-        # 空或0不处理
-        if not self._seeding_time:
-            return
-        try:
-            lock.acquire()
-            if self._pt_monitor_only:
-                tag = [PT_TAG]
-            else:
-                tag = None
-            log.info("【Downloader】开始执行做种清理，做种时间：%s..." % StringUtils.str_timelong(self._seeding_time))
-            torrents = self.client.get_remove_torrents(seeding_time=self._seeding_time, tag=tag)
-            for torrent in torrents:
-                self.delete_torrents(torrent)
-            log.info("【Downloader】做种清理完成")
-        finally:
-            lock.release()
+        if not downloader or not config:
+            return []
+        _client = self.__get_client(downloader)
+        if self._pt_monitor_only:
+            config["filter_tags"] = config["tags"] + [PT_TAG]
+        else:
+            config["filter_tags"] = config["tags"]
+        torrents = _client.get_remove_torrents(config=config)
+        torrents.sort(key=lambda x: x.get("name"))
+        return torrents
 
     def get_downloading_torrents(self):
         """
         查询正在下载中的种子信息
         :return: 客户端类型，下载中的种子信息列表
         """
-        if not self.client:
-            return self._client_type, []
+        if not self.default_client:
+            return self._default_client_type, []
         if self._pt_monitor_only:
             tag = [PT_TAG]
         else:
             tag = None
         try:
-            return self._client_type, self.client.get_downloading_torrents(tag=tag)
+            return self._default_client_type, self.default_client.get_downloading_torrents(tag=tag)
         except Exception as err:
-            print(str(err))
-            return self._client_type, []
+            ExceptionUtils.exception_traceback(err)
+            return self._default_client_type, []
+
+    def get_downloading_progress(self):
+        """
+        查询正在下载中的进度信息
+        """
+        if not self.default_client:
+            return []
+        if self._pt_monitor_only:
+            tag = [PT_TAG]
+        else:
+            tag = None
+        return self.default_client.get_downloading_progress(tag=tag)
 
     def get_torrents(self, torrent_ids):
         """
@@ -352,47 +400,74 @@ class Downloader:
         :param torrent_ids: 种子ID列表
         :return: 客户端类型，种子信息列表, 是否发生异常
         """
-        if not self.client:
+        if not self.default_client:
             return None, [], True
-        torrent_list, _ = self.client.get_torrents(ids=torrent_ids)
-        return self._client_type, torrent_list
+        torrent_list, _ = self.default_client.get_torrents(ids=torrent_ids)
+        return self._default_client_type, torrent_list
 
-    def start_torrents(self, ids):
+    def start_torrents(self, downloader=None, ids=None):
         """
         下载控制：开始
+        :param downloader: 下载器类型
         :param ids: 种子ID列表
         :return: 处理状态
         """
-        if not self.client:
+        if not ids:
             return False
-        return self.client.start_torrents(ids)
+        if not downloader:
+            if not self.default_client:
+                return False
+            return self.default_client.start_torrents(ids)
+        else:
+            _client = self.__get_client(downloader)
+            return _client.start_torrents(ids)
 
-    def stop_torrents(self, ids):
+    def stop_torrents(self, downloader=None, ids=None):
         """
         下载控制：停止
+        :param downloader: 下载器类型
         :param ids: 种子ID列表
         :return: 处理状态
         """
-        if not self.client:
+        if not ids:
             return False
-        return self.client.stop_torrents(ids)
+        if not downloader:
+            if not self.default_client:
+                return False
+            return self.default_client.stop_torrents(ids)
+        else:
+            _client = self.__get_client(downloader)
+            return _client.stop_torrents(ids)
 
-    def delete_torrents(self, ids):
+    def delete_torrents(self, downloader=None, ids=None, delete_file=False):
         """
         删除种子
+        :param downloader: 下载器类型
         :param ids: 种子ID列表
+        :param delete_file: 是否删除文件
         :return: 处理状态
         """
-        if not self.client:
+        if not ids:
             return False
-        return self.client.delete_torrents(delete_file=True, ids=ids)
+        if not downloader:
+            if not self.default_client:
+                return False
+            return self.default_client.delete_torrents(delete_file=delete_file, ids=ids)
+        else:
+            _client = self.__get_client(downloader)
+            return _client.delete_torrents(delete_file=delete_file, ids=ids)
 
-    def batch_download(self, in_from: SearchType, media_list: list, need_tvs: dict = None):
+    def batch_download(self,
+                       in_from: SearchType,
+                       media_list: list,
+                       need_tvs: dict = None,
+                       user_name=None):
         """
         根据命中的种子媒体信息，添加下载，由RSS或Searcher调用
         :param in_from: 来源
         :param media_list: 命中并已经识别好的媒体信息列表，包括名称、年份、季、集等信息
         :param need_tvs: 缺失的剧集清单，对于剧集只有在该清单中的季和集才会下载，对于电影无需输入该参数
+        :param user_name: 用户名称
         :return: 已经添加了下载的媒体信息表表、剩余未下载到的媒体信息
         """
 
@@ -401,11 +476,18 @@ class Downloader:
         # 返回按季、集数倒序排序的列表
         download_list = self.get_download_list(media_list)
 
-        def __download(download_item):
+        def __download(download_item, torrent_file=None, tag=None, is_paused=None):
             """
             下载及发送通知
             """
-            state, msg = self.download(media_info=download_item)
+            download_item.user_name = user_name
+            state, msg = self.download(
+                media_info=download_item,
+                download_dir=download_item.save_path,
+                download_setting=download_item.download_setting,
+                torrent_file=torrent_file,
+                tag=tag,
+                is_paused=is_paused)
             if state:
                 if download_item not in return_items:
                     return_items.append(download_item)
@@ -480,13 +562,15 @@ class Downloader:
                         if set(item_season).issubset(set(need_season)):
                             if len(item_season) == 1:
                                 # 只有一季的可能是命名错误，需要打开种子鉴别，只有实际集数大于等于总集数才下载
-                                torrent_episodes = self.get_torrent_episodes(url=item.enclosure,
-                                                                             page_url=item.page_url)
+                                torrent_episodes, torrent_path = self.get_torrent_episodes(
+                                    url=item.enclosure,
+                                    page_url=item.page_url)
                                 if not torrent_episodes \
                                         or len(torrent_episodes) >= __get_season_episodes(need_tmdbid, item_season[0]):
-                                    download_state = __download(item)
+                                    download_state = __download(download_item=item, torrent_file=torrent_path)
                                 else:
-                                    log.info(f"【Downloader】种子 {item.org_string} 未含集数信息，解析文件数为 {len(torrent_episodes)}")
+                                    log.info(
+                                        f"【Downloader】种子 {item.org_string} 未含集数信息，解析文件数为 {len(torrent_episodes)}")
                                     continue
                             else:
                                 download_state = __download(item)
@@ -533,7 +617,7 @@ class Downloader:
                     index += 1
 
         # 仍然缺失的剧集，从整季中选择需要的集数文件下载，仅支持QB和TR
-        if need_tvs and self._client_type in [DownloaderType.QB, DownloaderType.TR]:
+        if need_tvs:
             need_tv_list = list(need_tvs)
             for need_tmdbid in need_tv_list:
                 need_tv = need_tvs.get(need_tmdbid)
@@ -555,54 +639,56 @@ class Downloader:
                         # 选中一个单季整季的或单季包括需要的所有集的
                         if item.tmdb_id == need_tmdbid \
                                 and (not item.get_episode_list()
-                                     or set(item.get_episode_list()).issuperset(set(need_episodes))) \
+                                     or set(item.get_episode_list()).intersection(set(need_episodes))) \
                                 and len(item.get_season_list()) == 1 \
                                 and item.get_season_list()[0] == need_season:
+                            # 检查种子看是否有需要的集
+                            torrent_episodes, torrent_path = self.get_torrent_episodes(
+                                url=item.enclosure,
+                                page_url=item.page_url)
+                            selected_episodes = set(torrent_episodes).intersection(set(need_episodes))
+                            if not selected_episodes:
+                                log.info("【Downloader】%s 没有需要的集，跳过..." % item.org_string)
+                                continue
+                            # 添加下载并暂停
                             torrent_tag = "NT" + StringUtils.generate_random_str(5)
-                            ret, _ = self.download(media_info=item,
-                                                   is_paused=True,
-                                                   tag=torrent_tag)
+                            ret = __download(download_item=item,
+                                             torrent_file=torrent_path,
+                                             tag=torrent_tag,
+                                             is_paused=True)
                             if not ret:
                                 continue
-                            # 获取刚添加的任务ID
-                            torrent_id = None
-                            if self._client_type == DownloaderType.TR:
-                                if ret:
-                                    torrent_id = ret.id
-                            else:
-                                # QB添加下载后需要时间，重试5次每次等待5秒
-                                for i in range(1, 6):
-                                    sleep(5)
-                                    torrent_id = self.client.get_last_add_torrentid_by_tag(torrent_tag,
-                                                                                           status=["paused"])
-                                    if torrent_id is None:
-                                        continue
-                                    else:
-                                        self.client.remove_torrents_tag(torrent_id, torrent_tag)
-                                        break
-                            if not torrent_id:
-                                log.error("【Downloader】获取下载器添加的任务信息出错：%s，Tag=%s" % (item.org_string, torrent_tag))
-                                continue
-                            # 设置任务只下载想要的文件
-                            selected_episodes = self.set_files_status(torrent_id, need_episodes)
-                            if not selected_episodes:
-                                log.info("【Downloader】种子 %s 没有需要的集，删除下载任务..." % item.org_string)
-                                self.delete_torrents(ids=torrent_id)
-                                continue
-                            else:
-                                log.info("【Downloader】%s 选取文件完成，选中集数：%s" % (item.org_string, len(selected_episodes)))
-                            # 重新开始任务
-                            log.info("【Downloader】%s 开始下载" % item.org_string)
-                            self.start_torrents(torrent_id)
-                            # 记录下载项
-                            return_items.append(item)
-                            # 发送消息通知
-                            self.message.send_download_message(in_from, item)
-                            # 清除记忆并退出一层循环
+                            # 更新仍需集数
                             need_episodes = __update_episodes(tmdbid=need_tmdbid,
                                                               need=need_episodes,
                                                               seq=index,
                                                               current=selected_episodes)
+                            # 获取下载器
+                            downloader = self._default_client_type
+                            if item.download_setting:
+                                download_attr = self.get_download_setting(item.download_setting)
+                                if download_attr.get("downloader"):
+                                    downloader = self.__get_client_type(download_attr.get("downloader"))
+                            _client = self.__get_client(downloader)
+                            # 获取刚添加的任务ID
+                            if downloader == DownloaderType.TR:
+                                torrent_id = ret.id
+                            elif downloader == DownloaderType.QB:
+                                torrent_id = _client.get_torrent_id_by_tag(tag=torrent_tag, status=["paused"])
+                            else:
+                                continue
+                            if not torrent_id:
+                                log.error("【Downloader】获取下载器添加的任务信息出错：%s，tag=%s" % (
+                                    item.org_string, torrent_tag))
+                                continue
+                            # 设置任务只下载想要的文件
+                            log.info("【Downloader】从 %s 中选取集：%s" % (item.org_string, selected_episodes))
+                            self.set_files_status(torrent_id, selected_episodes, downloader)
+                            # 重新开始任务
+                            log.info("【Downloader】%s 开始下载 " % item.org_string)
+                            _client.start_torrents(torrent_id)
+                            # 记录下载项
+                            return_items.append(item)
                 index += 1
 
         # 返回下载的资源，剩下没下完的
@@ -645,16 +731,17 @@ class Downloader:
                         if total_ep.get(season):
                             episode_num = total_ep.get(season)
                         else:
-                            episode_num = self.media.get_tmdb_season_episodes_num(tv_info=tv_info, sea=season)
+                            episode_num = self.media.get_tmdb_season_episodes_num(tv_info=tv_info, season=season)
                         if not episode_num:
                             log.info("【Downloader】%s 第%s季 不存在" % (meta_info.get_title_string(), season))
                             message_list.append("%s 第%s季 不存在" % (meta_info.get_title_string(), season))
                             continue
                         total_seasons.append({"season_number": season, "episode_count": episode_num})
-                        log.info("【Downloader】%s 第%s季 共有 %s 集" % (meta_info.get_title_string(), season, episode_num))
+                        log.info(
+                            "【Downloader】%s 第%s季 共有 %s 集" % (meta_info.get_title_string(), season, episode_num))
                 else:
                     # 共有多少季，每季有多少季
-                    total_seasons = self.media.get_tmdb_seasons_list(tv_info=tv_info)
+                    total_seasons = self.media.get_tmdb_tv_seasons(tv_info=tv_info)
                     log.info(
                         "【Downloader】%s %s 共有 %s 季" % (
                             meta_info.type.value, meta_info.get_title_string(), len(total_seasons)))
@@ -716,10 +803,10 @@ class Downloader:
                                 # 有集数，肯定只有一季
                                 if not set(search_episode).intersection(set(no_exists_episodes)):
                                     # 搜索的跟不存在的没有交集，说明都存在了
-                                    log.info("【Downloader】%s %s 在媒体库中已经存在" % (
-                                        meta_info.get_title_string(), meta_info.get_season_episode_string()))
-                                    message_list.append("%s %s 在媒体库中已经存在" % (
-                                        meta_info.get_title_string(), meta_info.get_season_episode_string()))
+                                    msg = f"媒体库中已存在剧集：\n" \
+                                          f" • {meta_info.get_title_string()} {meta_info.get_season_episode_string()}"
+                                    log.info(f"【Downloader】{msg}")
+                                    message_list.append(msg)
                                     return_flag = True
                                     break
                         else:
@@ -746,23 +833,26 @@ class Downloader:
             if exists_movies is None:
                 exists_movies = self.filetransfer.get_no_exists_medias(meta_info)
             if exists_movies:
-                movies_str = "\n * ".join(["%s (%s)" % (m.get('title'), m.get('year')) for m in exists_movies])
-                log.info("【Downloader】媒体库中已经存在以下电影：\n * %s" % movies_str)
-                message_list.append("在媒体库中已经存在以下电影：\n * %s" % movies_str)
+                movies_str = "\n • ".join(["%s (%s)" % (m.get('title'), m.get('year')) for m in exists_movies])
+                msg = f"媒体库中已存在电影：\n • {movies_str}"
+                log.info(f"【Downloader】{msg}")
+                message_list.append(msg)
                 return True, {}, message_list
             return False, {}, message_list
 
-    def set_files_status(self, tid, need_episodes):
+    def set_files_status(self, tid, need_episodes, downloader):
         """
         设置文件下载状态，选中需要下载的季集对应的文件下载，其余不下载
         :param tid: 种子的hash或id
         :param need_episodes: 需要下载的文件的集信息
+        :param downloader: 下载器
         :return: 返回选中的集的列表
         """
         sucess_epidised = []
-        if self._client_type == DownloaderType.TR:
+        _client = self.__get_client(downloader)
+        if downloader == DownloaderType.TR:
             files_info = {}
-            torrent_files = self.client.get_files(tid)
+            torrent_files = _client.get_files(tid)
             if not torrent_files:
                 return []
             for file_id, torrent_file in enumerate(torrent_files):
@@ -778,10 +868,10 @@ class Downloader:
                 else:
                     files_info[tid][file_id] = {'priority': 'normal', 'selected': selected}
             if sucess_epidised and files_info:
-                self.client.set_files(file_info=files_info)
-        elif self._client_type == DownloaderType.QB:
+                _client.set_files(file_info=files_info)
+        elif downloader == DownloaderType.QB:
             file_ids = []
-            torrent_files = self.client.get_files(tid)
+            torrent_files = _client.get_files(tid)
             if not torrent_files:
                 return []
             for torrent_file in torrent_files:
@@ -792,7 +882,7 @@ class Downloader:
                 else:
                     sucess_epidised = list(set(sucess_epidised).union(set(meta_info.get_episode_list())))
             if sucess_epidised and file_ids:
-                self.client.set_files(torrent_hash=tid, file_ids=file_ids, priority=0)
+                _client.set_files(torrent_hash=tid, file_ids=file_ids, priority=0)
         return sucess_epidised
 
     def get_download_list(self, media_list):
@@ -839,12 +929,28 @@ class Downloader:
                 can_download_list_item.append(t_item)
         return can_download_list_item
 
-    def get_download_dirs(self):
+    def get_download_dirs(self, setting=None):
         """
         返回下载器中设置的保存目录
         """
         if not self._downloaddir:
             return []
+        if not setting:
+            setting = self.get_default_download_setting()
+        # 查询下载设置
+        download_setting = self.get_download_setting(sid=setting)
+        # 下载设置为QB
+        if download_setting \
+                and download_setting.get('downloader') == "Qbittorrent" \
+                and Config().get_config("qbittorrent").get("auto_management"):
+            return []
+        # 默认下载器为QB
+        if download_setting \
+                and not download_setting.get('downloader') \
+                and Config().get_config("pt").get("pt_client") == "qbittorrent" \
+                and Config().get_config("qbittorrent").get("auto_management"):
+            return []
+        # 查询目录
         save_path_list = [attr.get("save_path") for attr in self._downloaddir if attr.get("save_path")]
         save_path_list.sort()
         return list(set(save_path_list))
@@ -855,9 +961,18 @@ class Downloader:
         """
         if not self._downloaddir:
             return []
-        visit_path_list = [attr.get("container_path") or attr.get("save_path") for attr in self._downloaddir if attr.get("save_path")]
+        visit_path_list = [attr.get("container_path") or attr.get("save_path") for attr in self._downloaddir if
+                           attr.get("save_path")]
         visit_path_list.sort()
         return list(set(visit_path_list))
+
+    def get_download_visit_dir(self, download_dir):
+        """
+        返回下载器中设置的访问目录
+        """
+        if not self.default_client:
+            return ""
+        return self.default_client.get_replace_path(download_dir)
 
     def __get_download_dir_info(self, media):
         """
@@ -882,33 +997,40 @@ class Downloader:
                 return {"path": attr.get("save_path"), "label": attr.get("label")}
         return {"path": None, "label": None}
 
-    def get_type(self):
+    def get_default_client_type(self):
         """
         返回下载器类型
         """
-        return self._client_type
+        return self._default_client_type
+
+    @staticmethod
+    def __get_client_type(type_name):
+        """
+        根据名称返回下载器类型
+        """
+        if not type_name:
+            return None
+        for dict_type in DownloaderType:
+            if dict_type.name == type_name or dict_type.value == type_name:
+                return dict_type
 
     def get_torrent_episodes(self, url, page_url=None):
         """
         解析种子文件，获取集数
+        :return: 集数列表、种子路径
         """
-        cookie, ua, referer = self.sites.get_site_attr(url)
-        if not cookie:
-            return []
+        site_info = self.sites.get_site_attr(url)
         # 保存种子文件
-        file_path = Torrent.save_torrent_file(url=url,
-                                              cookie=cookie,
-                                              ua=ua,
-                                              path=os.path.join(Config().get_config_path(), "temp"),
-                                              referer=page_url if referer else None)
-        if not file_path:
-            log.error("【Downloader】下载种子文件失败：%s" % url)
-            return []
-        # 解析种子文件
-        files = Torrent.get_torrent_files(path=file_path)
+        file_path, _, _, files, retmsg = Torrent().get_torrent_info(
+            url=url,
+            cookie=site_info.get("cookie"),
+            ua=site_info.get("ua"),
+            referer=page_url if site_info.get("referer") else None,
+            proxy=site_info.get("proxy")
+        )
         if not files:
-            log.error("【Downloader】解析种子文件失败：%s" % file_path)
-            return []
+            log.error("【Downloader】读取种子文件集数出错：%s" % retmsg)
+            return [], None
         episodes = []
         for file in files:
             if os.path.splitext(file)[-1] not in RMT_MEDIAEXT:
@@ -917,10 +1039,43 @@ class Downloader:
             if not meta.begin_episode:
                 continue
             episodes = list(set(episodes).union(set(meta.get_episode_list())))
-        return episodes
+        return episodes, file_path
 
     def get_download_setting(self, sid=None):
+        """
+        获取下载设置
+        :return: 下载设置
+        """
         if sid:
             return self._download_setting.get(str(sid))
         else:
             return self._download_setting
+
+    def get_default_download_setting(self):
+        """
+        获取默认下载设置
+        :return: 默认下载设置id
+        """
+        default_download_setting = SystemConfig().get_system_config("DefaultDownloadSetting") or "-1"
+        if not self._download_setting.get(default_download_setting):
+            default_download_setting = "-1"
+        return default_download_setting
+
+    def set_speed_limit(self, downloader, download_limit=None, upload_limit=None):
+        """
+        设置速度限制
+        """
+        if not downloader:
+            return []
+        _client = self.__get_client(downloader)
+        try:
+            download_limit = int(download_limit) if download_limit else 0
+        except Exception as err:
+            ExceptionUtils.exception_traceback(err)
+            download_limit = 0
+        try:
+            upload_limit = int(upload_limit) if upload_limit else 0
+        except Exception as err:
+            ExceptionUtils.exception_traceback(err)
+            upload_limit = 0
+        _client.set_speed_limit(download_limit=download_limit, upload_limit=upload_limit)

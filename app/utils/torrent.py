@@ -1,229 +1,125 @@
 import os.path
 import re
-from urllib.parse import quote
-import bencode
+import datetime
+from urllib.parse import quote, unquote
 
-from app.utils.torrentParser import TorrentParser
-from config import TORRENT_SEARCH_PARAMS
-from app.utils import RequestUtils
+from bencode import bdecode
 
+from app.utils.http_utils import RequestUtils
+from config import Config
 
-class TorrentAttr:
-    def __init__(self):
-        self.free = None
-        self.free2x = None
-        self.peer_count = 0
-        self.hr = None
-
-    def __str__(self):
-        return "free: {}, free2x: {}, peer_count: {}, hr: {}".format(self.free, self.free2x, self.peer_count, self.hr)
-
-    def is_free(self):
-        return True if self.free or self.free2x else False
-
-    def is_free2x(self):
-        return True if self.free2x else False
-
-    def is_hr(self):
-        return True if self.hr else False
+# Trackers列表
+trackers = [
+    "udp://tracker.opentrackr.org:1337/announce",
+    "udp://9.rarbg.com:2810/announce",
+    "udp://opentracker.i2p.rocks:6969/announce",
+    "https://opentracker.i2p.rocks:443/announce",
+    "udp://tracker.torrent.eu.org:451/announce",
+    "udp://tracker1.bt.moack.co.kr:80/announce",
+    "udp://tracker.pomf.se:80/announce",
+    "udp://tracker.moeking.me:6969/announce",
+    "udp://tracker.dler.org:6969/announce",
+    "udp://p4p.arenabg.com:1337/announce",
+    "udp://open.stealth.si:80/announce",
+    "udp://movies.zsw.ca:6969/announce",
+    "udp://ipv4.tracker.harry.lu:80/announce",
+    "udp://explodie.org:6969/announce",
+    "udp://exodus.desync.com:6969/announce",
+    "https://tracker.nanoha.org:443/announce",
+    "https://tracker.lilithraws.org:443/announce",
+    "https://tr.burnabyhighstar.com:443/announce",
+    "http://tracker.mywaifu.best:6969/announce",
+    "http://bt.okmp3.ru:2710/announce"
+]
 
 
 class Torrent:
+    _torrent_temp_path = None
 
-    @staticmethod
-    def is_torrent_match_sey(media_info, s_num, e_num, year_str):
-        """
-        种子名称关键字匹配
-        :param media_info: 已识别的种子信息
-        :param s_num: 要匹配的季号，为空则不匹配
-        :param e_num: 要匹配的集号，为空则不匹配
-        :param year_str: 要匹配的年份，为空则不匹配
-        :return: 是否命中
-        """
-        if s_num:
-            if not media_info.get_season_list():
-                return False
-            if not isinstance(s_num, list):
-                s_num = [s_num]
-            if not set(s_num).issuperset(set(media_info.get_season_list())):
-                return False
-        if e_num:
-            if not isinstance(e_num, list):
-                e_num = [e_num]
-            if not set(e_num).issuperset(set(media_info.get_episode_list())):
-                return False
-        if year_str:
-            if str(media_info.year) != str(year_str):
-                return False
-        return True
+    def __init__(self):
+        self._torrent_temp_path = Config().get_temp_path()
+        if not os.path.exists(self._torrent_temp_path):
+            os.makedirs(self._torrent_temp_path)
 
-    @staticmethod
-    def get_torrent_content(url, cookie=None, ua=None, referer=None):
+    def get_torrent_info(self, url, cookie=None, ua=None, referer=None, proxy=False):
         """
         把种子下载到本地，返回种子内容
         :param url: 种子链接
         :param cookie: 站点Cookie
         :param ua: 站点UserAgent
         :param referer: 关联地址，有的网站需要这个否则无法下载
+        :param proxy: 是否使用内置代理
+        :return: 种子保存路径、种子内容、种子文件列表主目录、种子文件列表、错误信息
         """
         if not url:
-            return None, "URL为空"
+            return None, None, "", [], "URL为空"
         if url.startswith("magnet:"):
-            return url, "磁力链接"
+            return None, url, "", [], f"{url} 为磁力链接"
         try:
-            req = RequestUtils(headers=ua, cookies=cookie, referer=referer).get_res(url=url, allow_redirects=False)
-            while req and req.status_code in [301, 302]:
-                url = req.headers['Location']
-                if url and url.startswith("magnet:"):
-                    return url, "磁力链接"
-                req = RequestUtils(headers=ua, cookies=cookie, referer=referer).get_res(url=url, allow_redirects=False)
-            if req and req.status_code == 200:
-                if not req.content:
-                    return None, "未下载到种子数据"
-                metadata = bencode.bdecode(req.content)
-                if not metadata or not isinstance(metadata, dict):
-                    return None, "不正确的种子文件"
-                return req.content, ""
-            elif not req:
-                return None, "无法打开链接：%s" % url
-            else:
-                return None, "下载种子出错，状态码：%s" % req.status_code
+            # 下载保存种子文件
+            file_path, content, errmsg = self.save_torrent_file(url=url,
+                                                                cookie=cookie,
+                                                                ua=ua,
+                                                                referer=referer,
+                                                                proxy=proxy)
+            if not file_path:
+                return None, content, "", [], errmsg
+            # 解析种子文件
+            files_folder, files, retmsg = self.get_torrent_files(file_path)
+            # 种子文件路径、种子内容、种子文件列表主目录、种子文件列表、错误信息
+            return file_path, content, files_folder, files, retmsg
+
         except Exception as err:
-            return None, "下载种子文件出现异常：%s，可能站点Cookie已过期或触发了站点首次种子下载" % str(err)
+            return None, None, "", [], "下载种子文件出现异常：%s" % str(err)
 
-    @staticmethod
-    def save_torrent_file(url, path, cookie, ua, referer=None):
+    def save_torrent_file(self, url, cookie=None, ua=None, referer=None, proxy=False):
         """
-        下载种子并保存到文件，返回文件路径
+        把种子下载到本地
+        :return: 种子保存路径，错误信息
         """
-        if not os.path.exists(path):
-            os.makedirs(path)
-        # 下载种子
-        try:
-            ret = RequestUtils(cookies=cookie, headers=ua, referer=referer).get_res(url)
-            if ret and ret.status_code == 200:
-                file_name = re.findall(r"filename=\"?(.+)\"?", ret.headers.get('content-disposition'))
-                if not file_name:
-                    return None
-                file_name = file_name[0]
-                if file_name.endswith('"'):
-                    file_name = file_name[:-1]
-                file_path = os.path.join(path, file_name)
-                with open(file_path, 'wb') as f:
-                    f.write(ret.content)
-            elif not ret:
-                return None
+        req = RequestUtils(
+            headers=ua,
+            cookies=cookie,
+            referer=referer,
+            proxies=Config().get_proxies() if proxy else None
+        ).get_res(url=url, allow_redirects=False)
+        while req and req.status_code in [301, 302]:
+            url = req.headers['Location']
+            if url and url.startswith("magnet:"):
+                return None, url, f"获取到磁力链接：{url}"
+            req = RequestUtils(
+                headers=ua,
+                cookies=cookie,
+                referer=referer,
+                proxies=Config().get_proxies() if proxy else None
+            ).get_res(url=url, allow_redirects=False)
+        if req and req.status_code == 200:
+            if not req.content:
+                return None, None, "未下载到种子数据"
+            # 解析内容格式
+            if req.text and str(req.text).startswith("magnet:"):
+                return None, req.text, "磁力链接"
             else:
-                return None
-            return file_path
-        except Exception as err:
-            print(str(err))
-            return None
+                try:
+                    bdecode(req.content)
+                except Exception as err:
+                    print(str(err))
+                    return None, None, "种子数据有误，请确认链接是否正确，如为PT站点则需手工在站点下载一次种子"
+            # 读取种子文件名
+            file_name = self.__get_url_torrent_filename(req, url)
+            # 种子文件路径
+            file_path = os.path.join(self._torrent_temp_path, file_name)
+            # 种子内容
+            file_content = req.content
+            # 写入磁盘
+            with open(file_path, 'wb') as f:
+                f.write(file_content)
+        elif req is None:
+            return None, None, "无法打开链接：%s" % url
+        else:
+            return None, None, "下载种子出错，状态码：%s" % req.status_code
 
-    @staticmethod
-    def check_torrent_filter(meta_info, filter_args, uploadvolumefactor=None, downloadvolumefactor=None):
-        """
-        对种子进行过滤
-        :param meta_info: 名称识别后的MetaBase对象
-        :param filter_args: 过滤条件的字典
-        :param uploadvolumefactor: 种子的上传因子 传空不过滤
-        :param downloadvolumefactor: 种子的下载因子 传空不过滤
-        """
-        if filter_args.get("restype"):
-            restype_re = TORRENT_SEARCH_PARAMS["restype"].get(filter_args.get("restype"))
-            if not meta_info.resource_type:
-                return False
-            if restype_re and not re.search(r"%s" % restype_re, meta_info.resource_type, re.IGNORECASE):
-                return False
-        if filter_args.get("pix"):
-            restype_re = TORRENT_SEARCH_PARAMS["pix"].get(filter_args.get("pix"))
-            if not meta_info.resource_pix:
-                return False
-            if restype_re and not re.search(r"%s" % restype_re, meta_info.resource_pix, re.IGNORECASE):
-                return False
-        if filter_args.get("team"):
-            restype_re = filter_args.get("team")
-            if not meta_info.resource_team:
-                return False
-            if restype_re and not re.search(r"%s" % restype_re, meta_info.resource_team, re.IGNORECASE):
-                return False
-        if filter_args.get("sp_state"):
-            ul_factor, dl_factor = filter_args.get("sp_state").split()
-            if uploadvolumefactor and ul_factor not in ("*", str(uploadvolumefactor)):
-                return False
-            if downloadvolumefactor and dl_factor not in ("*", str(downloadvolumefactor)):
-                return False
-        if filter_args.get("key") and not re.search(r"%s" % filter_args.get("key"),
-                                                    meta_info.org_string,
-                                                    re.IGNORECASE):
-            return False
-        return True
-
-    @staticmethod
-    def get_rss_note_item(desc):
-        """
-        解析订阅的NOTE字段，从中获取订阅站点、搜索站点、是否洗版、订阅质量、订阅分辨率、订阅制作组/字幕组、过滤规则等信息
-        DESC字段组成：RSS站点#搜索站点#是否洗版(Y/N)#过滤条件，站点用|分隔多个站点，过滤条件用@分隔多个条件
-        :param desc: RSS订阅DESC字段的值
-        :return: 订阅站点、搜索站点、是否洗版、过滤字典、总集数，当前集数
-        """
-        if not desc:
-            return {}
-        rss_sites = []
-        search_sites = []
-        over_edition = False
-        rss_restype = None
-        rss_pix = None
-        rss_team = None
-        rss_rule = None
-        total_episode = None
-        current_episode = None
-        notes = str(desc).split('#')
-        # 订阅站点
-        if len(notes) > 0:
-            if notes[0]:
-                rss_sites = [site for site in notes[0].split('|') if site and len(site) < 20]
-        # 搜索站点
-        if len(notes) > 1:
-            if notes[1]:
-                search_sites = [site for site in notes[1].split('|') if site]
-        # 洗版
-        if len(notes) > 2:
-            if notes[2] == 'Y':
-                over_edition = True
-            else:
-                over_edition = False
-        # 过滤条件
-        if len(notes) > 3:
-            if notes[3]:
-                filters = notes[3].split('@')
-                if len(filters) > 0:
-                    rss_restype = filters[0]
-                if len(filters) > 1:
-                    rss_pix = filters[1]
-                if len(filters) > 2:
-                    rss_rule = filters[2]
-                if len(filters) > 3:
-                    rss_team = filters[3]
-        # 总集数及当前集数
-        if len(notes) > 4:
-            if notes[4]:
-                episode_info = notes[4].split('@')
-                if len(episode_info) > 0:
-                    total_episode = episode_info[0]
-                if len(episode_info) > 1:
-                    current_episode = episode_info[1]
-        return {
-            "rss_sites": rss_sites,
-            "search_sites": search_sites,
-            "over_edition": over_edition,
-            "filter_map": {"restype": rss_restype,
-                           "pix": rss_pix,
-                           "rule": rss_rule,
-                           "team": rss_team},
-            "episode_info": {"total": total_episode,
-                             "current": current_episode}
-        }
+        return file_path, file_content, ""
 
     @staticmethod
     def convert_hash_to_magnet(hash_text, title):
@@ -238,28 +134,126 @@ class Torrent:
         if not hash_text:
             return None
         hash_text = hash_text.group(0)
-        return f'magnet:?xt=urn:btih:{hash_text}&dn={quote(title)}&tr=udp%3A%2F%2Ftracker.openbittorrent.com%3A80' \
-               '&tr=udp%3A%2F%2Fopentor.org%3A2710' \
-               '&tr=udp%3A%2F%2Ftracker.ccc.de%3A80' \
-               '&tr=udp%3A%2F%2Ftracker.blackunicorn.xyz%3A6969' \
-               '&tr=udp%3A%2F%2Ftracker.coppersurfer.tk%3A6969' \
-               '&tr=udp%3A%2F%2Ftracker.leechers-paradise.org%3A6969'
+        ret_magnet = f'magnet:?xt=urn:btih:{hash_text}&dn={quote(title)}'
+        for tracker in trackers:
+            ret_magnet = f'{ret_magnet}&tr={quote(tracker)}'
+        return ret_magnet
+
+    @staticmethod
+    def add_trackers_to_magnet(url, title=None):
+        """
+        添加tracker和标题到磁力链接
+        """
+        if not url or not title:
+            return None
+        ret_magnet = url
+        if title and url.find("&dn=") == -1:
+            ret_magnet = f'{ret_magnet}&dn={quote(title)}'
+        for tracker in trackers:
+            ret_magnet = f'{ret_magnet}&tr={quote(tracker)}'
+        return ret_magnet
 
     @staticmethod
     def get_torrent_files(path):
         """
         解析Torrent文件，获取文件清单
+        :return: 种子文件列表主目录、种子文件列表、错误信息
         """
         if not path or not os.path.exists(path):
-            return []
+            return "", [], f"种子文件不存在：{path}"
         file_names = []
+        file_folder = ""
         try:
-            torrent = TorrentParser().readFile(path=path)
-            if torrent.get("torrent"):
-                files = torrent.get("torrent").get("info", {}).get("files") or []
-                for item in files:
-                    if item.get("path"):
-                        file_names.append(item["path"][0])
+            torrent = bdecode(open(path, 'rb').read())
+            if torrent.get("info"):
+                files = torrent.get("info", {}).get("files") or []
+                if files:
+                    for item in files:
+                        if item.get("path"):
+                            file_names.append(item["path"][0])
+                    file_folder = torrent.get("info", {}).get("name")
+                else:
+                    file_names.append(torrent.get("info", {}).get("name"))
         except Exception as err:
-            print(str(err))
-        return file_names
+            return file_folder, file_names, "解析种子文件异常：%s" % str(err)
+        return file_folder, file_names, ""
+
+    def read_torrent_content(self, path):
+        """
+        读取本地种子文件的内容
+        :return: 种子内容、种子文件列表主目录、种子文件列表、错误信息
+        """
+        if not path or not os.path.exists(path):
+            return None, "", [], "种子文件不存在：%s" % path
+        content, retmsg, file_folder, files = None, "", "", []
+        try:
+            # 读取种子文件内容
+            with open(path, 'rb') as f:
+                content = f.read()
+            # 解析种子文件
+            file_folder, files, retmsg = self.get_torrent_files(path)
+        except Exception as e:
+            retmsg = "读取种子文件出错：%s" % str(e)
+        return content, file_folder, files, retmsg
+
+    @staticmethod
+    def __get_url_torrent_filename(req, url):
+        """
+        从下载请求中获取种子文件名
+        """
+        if not req:
+            return ""
+        disposition = req.headers.get('content-disposition') or ""
+        file_name = re.findall(r"filename=\"?(.+)\"?", disposition)
+        if file_name:
+            file_name = unquote(str(file_name[0].encode('ISO-8859-1').decode()).split(";")[0].strip())
+            if file_name.endswith('"'):
+                file_name = file_name[:-1]
+        elif url and url.endswith(".torrent"):
+            file_name = unquote(url.split("/")[-1])
+        else:
+            file_name = str(datetime.datetime.now())
+        return file_name
+
+    @staticmethod
+    def get_magnet_title(url):
+        """
+        从磁力链接中获取标题
+        """
+        if not url:
+            return ""
+        title = re.findall(r"dn=(.+)&?", url)
+        return unquote(title[0]) if title else ""
+
+    @staticmethod
+    def get_intersection_episodes(target, source, title):
+        """
+        对两个季集字典进行判重，有相同项目的取集的交集
+        """
+        if not source or not title:
+            return target
+        if not source.get(title):
+            return target
+        if not target.get(title):
+            target[title] = source.get(title)
+            return target
+        index = -1
+        for target_info in target.get(title):
+            index += 1
+            source_info = None
+            for info in source.get(title):
+                if info.get("season") == target_info.get("season"):
+                    source_info = info
+                    break
+            if not source_info:
+                continue
+            if not source_info.get("episodes"):
+                continue
+            if not target_info.get("episodes"):
+                target_episodes = source_info.get("episodes")
+                target[title][index]["episodes"] = target_episodes
+                continue
+            target_episodes = list(set(target_info.get("episodes")).intersection(set(source_info.get("episodes"))))
+            target[title][index]["episodes"] = target_episodes
+        return target
+

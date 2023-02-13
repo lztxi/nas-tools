@@ -4,8 +4,10 @@ import platform
 import shutil
 import subprocess
 
-from app.utils import PathUtils
+from app.utils.path_utils import PathUtils
+from app.utils.exception_utils import ExceptionUtils
 from app.utils.types import OsType
+from config import WEBDRIVER_PATH
 
 
 class SystemUtils:
@@ -33,7 +35,7 @@ class SystemUtils:
             total_b, used_b, free_b = shutil.disk_usage(path)
             return used_b, total_b
         except Exception as e:
-            print(str(e))
+            ExceptionUtils.exception_traceback(e)
             return 0, 0
 
     @staticmethod
@@ -41,8 +43,14 @@ class SystemUtils:
         """
         获取操作系统类型
         """
-        if platform.system() == 'Windows':
+        if SystemUtils.is_windows():
             return OsType.WINDOWS
+        elif SystemUtils.is_synology():
+            return OsType.SYNOLOGY
+        elif SystemUtils.is_docker():
+            return OsType.DOCKER
+        elif SystemUtils.is_macos():
+            return OsType.MACOS
         else:
             return OsType.LINUX
 
@@ -64,7 +72,7 @@ class SystemUtils:
             local_date = utc_date + datetime.timedelta(hours=8)
             local_date_str = datetime.datetime.strftime(local_date, '%Y-%m-%d %H:%M:%S')
         except Exception as e:
-            print(f'Could not get local date:{e}')
+            ExceptionUtils.exception_traceback(e)
             return utc_time_str
         return local_date_str
 
@@ -83,11 +91,42 @@ class SystemUtils:
         """
         执行命令，获得返回结果
         """
-        return os.popen(cmd).readline().strip()
+        try:
+            with os.popen(cmd) as p:
+                return p.readline().strip()
+        except Exception as err:
+            print(str(err))
+            return ""
 
     @staticmethod
     def is_docker():
         return os.path.exists('/.dockerenv')
+
+    @staticmethod
+    def is_synology():
+        if SystemUtils.is_windows():
+            return False
+        return True if "synology" in SystemUtils.execute('uname -a') else False
+        
+    @staticmethod
+    def is_windows():
+        return True if os.name == "nt" else False
+
+    @staticmethod
+    def is_macos():
+        return True if platform.system() == 'Darwin' else False
+
+    @staticmethod
+    def is_lite_version():
+        return True if SystemUtils.is_docker() \
+                       and os.environ.get("NASTOOL_VERSION") == "lite" else False
+
+    @staticmethod
+    def get_webdriver_path():
+        if SystemUtils.is_lite_version():
+            return None
+        else:
+            return WEBDRIVER_PATH.get(SystemUtils.get_system().value)
 
     @staticmethod
     def copy(src, dest):
@@ -98,6 +137,7 @@ class SystemUtils:
             shutil.copy2(os.path.normpath(src), os.path.normpath(dest))
             return 0, ""
         except Exception as err:
+            ExceptionUtils.exception_traceback(err)
             return -1, str(err)
 
     @staticmethod
@@ -108,10 +148,11 @@ class SystemUtils:
         try:
             tmp_file = os.path.normpath(os.path.join(os.path.dirname(src),
                                                      os.path.basename(dest)))
-            os.rename(os.path.normpath(src), tmp_file)
+            shutil.move(os.path.normpath(src), tmp_file)
             shutil.move(tmp_file, os.path.normpath(dest))
             return 0, ""
         except Exception as err:
+            ExceptionUtils.exception_traceback(err)
             return -1, str(err)
 
     @staticmethod
@@ -130,6 +171,7 @@ class SystemUtils:
                 os.link(os.path.normpath(src), os.path.normpath(dest))
             return 0, ""
         except Exception as err:
+            ExceptionUtils.exception_traceback(err)
             return -1, str(err)
 
     @staticmethod
@@ -141,6 +183,7 @@ class SystemUtils:
             os.symlink(os.path.normpath(src), os.path.normpath(dest))
             return 0, ""
         except Exception as err:
+            ExceptionUtils.exception_traceback(err)
             return -1, str(err)
 
     @staticmethod
@@ -157,6 +200,7 @@ class SystemUtils:
                                      startupinfo=SystemUtils.__get_hidden_shell()).returncode
             return retcode, ""
         except Exception as err:
+            ExceptionUtils.exception_traceback(err)
             return -1, str(err)
 
     @staticmethod
@@ -173,6 +217,7 @@ class SystemUtils:
                                      startupinfo=SystemUtils.__get_hidden_shell()).returncode
             return retcode, ""
         except Exception as err:
+            ExceptionUtils.exception_traceback(err)
             return -1, str(err)
 
     @staticmethod
@@ -192,6 +237,7 @@ class SystemUtils:
                                      startupinfo=SystemUtils.__get_hidden_shell()).returncode
             return retcode, ""
         except Exception as err:
+            ExceptionUtils.exception_traceback(err)
             return -1, str(err)
 
     @staticmethod
@@ -211,6 +257,7 @@ class SystemUtils:
                                      startupinfo=SystemUtils.__get_hidden_shell()).returncode
             return retcode, ""
         except Exception as err:
+            ExceptionUtils.exception_traceback(err)
             return -1, str(err)
 
     @staticmethod
@@ -225,23 +272,53 @@ class SystemUtils:
                 vols.append(vol)
         return vols
 
-    @staticmethod
-    def find_links(file, fdir=None):
+    def find_hardlinks(self, file, fdir=None):
         """
         查找文件的所有硬链接
         """
         ret_files = []
         if os.name == "nt":
-            stdout = subprocess.run(['fsutil',
-                                     'hardlink',
-                                     'list',
-                                     file], shell=True, stdout=subprocess.PIPE).stdout
+            ret = subprocess.run(
+                ['fsutil', 'hardlink', 'list', file],
+                startupinfo=self.__get_hidden_shell(),
+                stdout=subprocess.PIPE
+            )
+            if ret.returncode != 0:
+                return []
+            if ret.stdout:
+                drive = os.path.splitdrive(file)[0]
+                link_files = ret.stdout.decode('GBK').replace('\\', '/').split('\r\n')
+                for link_file in link_files:
+                    if link_file \
+                            and "$RECYCLE.BIN" not in link_file \
+                            and os.path.normpath(file) != os.path.normpath(f'{drive}{link_file}'):
+                        link_file = f'{drive.upper()}{link_file}'
+                        file_name = os.path.basename(link_file)
+                        file_path = os.path.dirname(link_file)
+                        ret_files.append({
+                            "file": link_file,
+                            "filename": file_name,
+                            "filepath": file_path
+                        })
         else:
-            stdout = subprocess.run(['find',
-                                     '-L',
-                                     fdir,
-                                     '-samefile',
-                                     file], shell=True, stdout=subprocess.PIPE).stdout
-        if stdout:
-            ret_files = stdout.decode('utf-8').split()
+            inode = os.stat(file).st_ino
+            if not fdir:
+                fdir = os.path.dirname(file)
+            stdout = subprocess.run(
+                ['find', fdir, '-inum', str(inode)],
+                stdout=subprocess.PIPE
+            ).stdout
+            if stdout:
+                link_files = stdout.decode('utf-8').split('\n')
+                for link_file in link_files:
+                    if link_file \
+                            and os.path.normpath(file) != os.path.normpath(link_file):
+                        file_name = os.path.basename(link_file)
+                        file_path = os.path.dirname(link_file)
+                        ret_files.append({
+                            "file": link_file,
+                            "filename": file_name,
+                            "filepath": file_path
+                        })
+
         return ret_files

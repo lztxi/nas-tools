@@ -5,8 +5,8 @@ from sqlalchemy.orm import sessionmaker, scoped_session
 from sqlalchemy.pool import QueuePool
 
 from app.db.models import Base
+from app.utils import ExceptionUtils, PathUtils
 from config import Config
-from app.utils import PathUtils
 
 lock = threading.Lock()
 _Engine = create_engine(
@@ -14,26 +14,21 @@ _Engine = create_engine(
     echo=False,
     poolclass=QueuePool,
     pool_pre_ping=True,
-    pool_size=5,
-    pool_recycle=60 * 30
+    pool_size=50,
+    pool_recycle=60 * 10,
+    max_overflow=0
 )
 _Session = scoped_session(sessionmaker(bind=_Engine,
                                        autoflush=True,
-                                       autocommit=False))
+                                       autocommit=False,
+                                       expire_on_commit=False))
 
 
 class MainDb:
-    _session = None
-
-    def __init__(self):
-        self._session = _Session()
-
-    def __del__(self):
-        self._session.close()
 
     @property
     def session(self):
-        return self._session
+        return _Session()
 
     @staticmethod
     def init_db():
@@ -46,7 +41,7 @@ class MainDb:
         """
         config = Config().get_config()
         init_files = Config().get_config("app").get("init_files") or []
-        config_dir = os.path.join(Config().get_root_path(), "config")
+        config_dir = Config().get_script_path()
         sql_files = PathUtils.get_dir_level1_files(in_path=config_dir, exts=".sql")
         config_flag = False
         for sql_file in sql_files:
@@ -55,8 +50,11 @@ class MainDb:
                 with open(sql_file, "r", encoding="utf-8") as f:
                     sql_list = f.read().split(';\n')
                     for sql in sql_list:
-                        self.excute(sql)
-                        self.commit()
+                        try:
+                            self.excute(sql)
+                            self.commit()
+                        except Exception as err:
+                            print(str(err))
                 init_files.append(os.path.basename(sql_file))
         if config_flag:
             config['app']['init_files'] = init_files
@@ -117,7 +115,7 @@ class DbPersist(object):
                 self.db.commit()
                 return True if ret is None else ret
             except Exception as e:
-                print(e.args)
+                ExceptionUtils.exception_traceback(e)
                 self.db.rollback()
                 return False
 

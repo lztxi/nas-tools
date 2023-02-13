@@ -2,8 +2,6 @@ from flask import Blueprint, request
 from flask_restx import Api, reqparse, Resource
 
 from app.brushtask import BrushTask
-from app.downloader import Downloader
-from app.indexer import BuiltinIndexer
 from app.rsschecker import RssChecker
 from app.sites import Sites
 from app.utils import TokenCache
@@ -20,7 +18,7 @@ apiv1_bp = Blueprint("apiv1",
 Apiv1 = Api(apiv1_bp,
             version="1.0",
             title="NAStool Api",
-            description="",
+            description="POST接口调用 /user/login 获取Token，GET接口使用 基础设置->安全->Api Key 调用",
             doc="/",
             security='Bearer Auth',
             authorizations={"Bearer Auth": {"type": "apiKey", "name": "Authorization", "in": "header"}},
@@ -37,12 +35,15 @@ recommend = Apiv1.namespace('recommend', description='推荐')
 search = Apiv1.namespace('search', description='搜索')
 download = Apiv1.namespace('download', description='下载')
 organization = Apiv1.namespace('organization', description='整理')
+torrentremover = Apiv1.namespace('torrentremover', description='自动删种')
 library = Apiv1.namespace('library', description='媒体库')
 brushtask = Apiv1.namespace('brushtask', description='刷流')
 media = Apiv1.namespace('media', description='媒体')
 sync = Apiv1.namespace('sync', description='目录同步')
 filterrule = Apiv1.namespace('filterrule', description='过滤规则')
 words = Apiv1.namespace('words', description='识别词')
+message = Apiv1.namespace('message', description='消息通知')
+douban = Apiv1.namespace('douban', description='豆瓣')
 
 
 class ApiResource(Resource):
@@ -218,7 +219,10 @@ class ServiceNetworkTest(ClientResource):
 @service.route('/run')
 class ServiceRun(ClientResource):
     parser = reqparse.RequestParser()
-    parser.add_argument('item', type=str, help='服务ID', location='form', required=True)
+    parser.add_argument('item', type=str,
+                        help='服务名称（autoremovetorrents、pttransfer、ptsignin、sync、rssdownload、douban、subscribe_search_all）',
+                        location='form',
+                        required=True)
 
     @service.doc(parser=parser)
     def post(self):
@@ -240,7 +244,7 @@ class SiteStatistic(ApiResource):
             "code": 0,
             "success": True,
             "data": {
-                "user_statistics": Sites().get_site_user_statistics(encoding="DICT")
+                "user_statistics": WebAction().get_site_user_statistics({"encoding": "DICT"}).get("data")
             }
         }
 
@@ -292,6 +296,19 @@ class SiteInfo(ClientResource):
         查询单个站点详情
         """
         return WebAction().api_action(cmd='get_site', data=self.parser.parse_args())
+
+
+@site.route('/favicon')
+class SiteFavicon(ClientResource):
+    parser = reqparse.RequestParser()
+    parser.add_argument('name', type=str, help='站点名称', location='form', required=True)
+
+    @site.doc(parser=parser)
+    def post(self):
+        """
+        获取站点图标(Base64)
+        """
+        return WebAction().api_action(cmd='get_site_favicon', data=self.parser.parse_args())
 
 
 @site.route('/test')
@@ -389,41 +406,36 @@ class SiteResources(ClientResource):
 
 @site.route('/list')
 class SiteList(ClientResource):
-    @staticmethod
-    def post():
+    parser = reqparse.RequestParser()
+    parser.add_argument('basic', type=int, help='只查询基本信息（0-否/1-是）', location='form')
+    parser.add_argument('rss', type=int, help='订阅（0-否/1-是）', location='form')
+    parser.add_argument('brush', type=int, help='刷流（0-否/1-是）', location='form')
+    parser.add_argument('signin', type=int, help='签到（0-否/1-是）', location='form')
+    parser.add_argument('statistic', type=int, help='数据统计（0-否/1-是）', location='form')
+
+    def post(self):
         """
         查询站点列表
         """
-        return {
-            "code": 0,
-            "success": True,
-            "data": {
-                "result": Sites().get_sites()
-            }
-        }
+        return WebAction().api_action(cmd='get_sites', data=self.parser.parse_args())
 
 
 @site.route('/indexers')
 class SiteIndexers(ClientResource):
+
     @staticmethod
     def post():
         """
         查询站点索引列表
         """
-        return {
-            "code": 0,
-            "success": True,
-            "data": {
-                "result": [index.__dict__ for index in BuiltinIndexer().get_indexers(check=False, public=False)]
-            }
-        }
+        return WebAction().api_action(cmd='get_indexers')
 
 
 @search.route('/keyword')
 class SearchKeyword(ClientResource):
     parser = reqparse.RequestParser()
     parser.add_argument('search_word', type=str, help='搜索关键字', location='form', required=True)
-    parser.add_argument('unident', type=bool, help='快速模式', location='form')
+    parser.add_argument('unident', type=int, help='快速模式（0-否/1-是）', location='form')
     parser.add_argument('filters', type=str, help='过滤条件', location='form')
     parser.add_argument('tmdbid', type=str, help='TMDBID', location='form')
     parser.add_argument('media_type', type=str, help='类型（电影/电视剧）', location='form')
@@ -450,7 +462,8 @@ class SearchResult(ClientResource):
 class DownloadSearch(ClientResource):
     parser = reqparse.RequestParser()
     parser.add_argument('id', type=str, help='搜索结果ID', location='form', required=True)
-    parser.add_argument('dir', type=str, help='下载目录', location='form')
+    parser.add_argument('dir', type=str, help='保存目录', location='form')
+    parser.add_argument('setting', type=str, help='下载设置', location='form')
 
     @download.doc(parser=parser)
     def post(self):
@@ -577,12 +590,14 @@ class DownloadConfigUpdate(ClientResource):
     parser.add_argument('name', type=str, help='名称', location='form', required=True)
     parser.add_argument('category', type=str, help='分类', location='form')
     parser.add_argument('tags', type=str, help='标签', location='form')
-    parser.add_argument('content_layout', type=int, help='布局', location='form')
-    parser.add_argument('is_paused', type=int, help='动作', location='form')
+    parser.add_argument('content_layout', type=int, help='布局（0-全局/1-原始/2-创建子文件夹/3-不建子文件夹）',
+                        location='form')
+    parser.add_argument('is_paused', type=int, help='动作（0-添加后开始/1-添加后暂停）', location='form')
     parser.add_argument('upload_limit', type=int, help='上传速度限制', location='form')
     parser.add_argument('download_limit', type=int, help='下载速度限制', location='form')
     parser.add_argument('ratio_limit', type=int, help='分享率限制', location='form')
     parser.add_argument('seeding_time_limit', type=int, help='做种时间限制', location='form')
+    parser.add_argument('downloader', type=str, help='下载器（Qbittorrent/Transmission）', location='form')
 
     @download.doc(parser=parser)
     def post(self):
@@ -607,18 +622,26 @@ class DownloadConfigDelete(ClientResource):
 
 @download.route('/config/list')
 class DownloadConfigList(ClientResource):
-    @staticmethod
-    def post():
+    parser = reqparse.RequestParser()
+    parser.add_argument('sid', type=str, help='ID', location='form')
+
+    def post(self):
         """
-        查询所有下载设置
+        查询下载设置
         """
-        return {
-            "code": 0,
-            "success": True,
-            "data": {
-                "result": Downloader().get_download_setting()
-            }
-        }
+        return WebAction().api_action(cmd="get_download_setting", data=self.parser.parse_args())
+
+
+@download.route('/config/directory')
+class DownloadConfigDirectory(ClientResource):
+    parser = reqparse.RequestParser()
+    parser.add_argument('sid', type=str, help='下载设置ID', location='form')
+
+    def post(self):
+        """
+        查询下载保存目录
+        """
+        return WebAction().api_action(cmd="get_download_dirs", data=self.parser.parse_args())
 
 
 @organization.route('/unknown/delete')
@@ -754,7 +777,7 @@ class TransferCacheEmpty(ClientResource):
         return WebAction().api_action(cmd='truncate_blacklist')
 
 
-@library.route('/library/start')
+@library.route('/sync/start')
 class LibrarySyncStart(ClientResource):
 
     @staticmethod
@@ -765,7 +788,7 @@ class LibrarySyncStart(ClientResource):
         return WebAction().api_action(cmd='start_mediasync')
 
 
-@library.route('/library/status')
+@library.route('/sync/status')
 class LibrarySyncStatus(ClientResource):
 
     @staticmethod
@@ -776,7 +799,7 @@ class LibrarySyncStatus(ClientResource):
         return WebAction().api_action(cmd='mediasync_state')
 
 
-@library.route('/library/playhistory')
+@library.route('/mediaserver/playhistory')
 class LibraryPlayHistory(ClientResource):
 
     @staticmethod
@@ -787,7 +810,7 @@ class LibraryPlayHistory(ClientResource):
         return WebAction().api_action(cmd='get_library_playhistory')
 
 
-@library.route('/library/statistics')
+@library.route('/mediaserver/statistics')
 class LibraryStatistics(ClientResource):
 
     @staticmethod
@@ -798,7 +821,7 @@ class LibraryStatistics(ClientResource):
         return WebAction().api_action(cmd="get_library_mediacount")
 
 
-@library.route('/library/space')
+@library.route('/space')
 class LibrarySpace(ClientResource):
 
     @staticmethod
@@ -811,13 +834,15 @@ class LibrarySpace(ClientResource):
 
 @system.route('/logging')
 class SystemLogging(ClientResource):
+    parser = reqparse.RequestParser()
+    parser.add_argument('refresh_new', type=int, help='是否刷新增量日志（0-否/1-是）', location='form', required=True)
 
-    @staticmethod
-    def post():
+    @system.doc(parser=parser)
+    def post(self):
         """
         获取实时日志
         """
-        return WebAction().api_action(cmd='logging')
+        return WebAction().api_action(cmd='logging', data=self.parser.parse_args())
 
 
 @system.route('/version')
@@ -835,7 +860,8 @@ class SystemVersion(ClientResource):
 class SystemPath(ClientResource):
     parser = reqparse.RequestParser()
     parser.add_argument('dir', type=str, help='路径', location='form', required=True)
-    parser.add_argument('filter', type=str, help='过滤器（ONLYFILE/ONLYDIR/MEDIAFILE/SUBFILE/ALL）', location='form', required=True)
+    parser.add_argument('filter', type=str, help='过滤器（ONLYFILE/ONLYDIR/MEDIAFILE/SUBFILE/ALL）', location='form',
+                        required=True)
 
     @system.doc(parser=parser)
     def post(self):
@@ -1002,18 +1028,20 @@ class SubscribeAdd(ClientResource):
     parser.add_argument('name', type=str, help='名称', location='form', required=True)
     parser.add_argument('type', type=str, help='类型（MOV/TV）', location='form', required=True)
     parser.add_argument('year', type=str, help='发行年份', location='form')
+    parser.add_argument('keyword', type=str, help='自定义搜索词', location='form')
     parser.add_argument('season', type=int, help='季号', location='form')
     parser.add_argument('rssid', type=int, help='已有订阅ID', location='form')
-    parser.add_argument('tmdbid', type=str, help='TMDBID', location='form')
-    parser.add_argument('doubanid', type=str, help='豆瓣ID', location='form')
-    parser.add_argument('match', type=bool, help='模糊匹配', location='form')
-    parser.add_argument('sites', type=list, help='RSS站点', location='form')
+    parser.add_argument('mediaid', type=str, help='TMDBID/DB:豆瓣ID', location='form')
+    parser.add_argument('fuzzy_match', type=int, help='模糊匹配（0-否/1-是）', location='form')
+    parser.add_argument('rss_sites', type=list, help='RSS站点', location='form')
     parser.add_argument('search_sites', type=list, help='搜索站点', location='form')
-    parser.add_argument('over_edition', type=bool, help='洗版', location='form')
-    parser.add_argument('rss_restype', type=str, help='资源类型', location='form')
-    parser.add_argument('rss_pix', type=str, help='分辨率', location='form')
-    parser.add_argument('rss_team', type=str, help='字幕组/发布组', location='form')
-    parser.add_argument('rss_rule', type=str, help='过滤规则', location='form')
+    parser.add_argument('over_edition', type=int, help='洗版（0-否/1-是）', location='form')
+    parser.add_argument('filter_restype', type=str, help='资源类型', location='form')
+    parser.add_argument('filter_pix', type=str, help='分辨率', location='form')
+    parser.add_argument('filter_team', type=str, help='字幕组/发布组', location='form')
+    parser.add_argument('filter_rule', type=int, help='过滤规则', location='form')
+    parser.add_argument('download_setting', type=int, help='下载设置', location='form')
+    parser.add_argument('save_path', type=str, help='保存路径', location='form')
     parser.add_argument('total_ep', type=int, help='总集数', location='form')
     parser.add_argument('current_ep', type=int, help='开始集数', location='form')
 
@@ -1441,8 +1469,7 @@ class MediaCategoryList(ClientResource):
 class MediaInfo(ClientResource):
     parser = reqparse.RequestParser()
     parser.add_argument('type', type=str, help='类型（MOV/TV）', location='form', required=True)
-    parser.add_argument('id', type=str, help='TMDBID', location='form')
-    parser.add_argument('doubanid', type=str, help='豆瓣ID', location='form')
+    parser.add_argument('id', type=str, help='TMDBID/DB:豆瓣ID', location='form')
     parser.add_argument('title', type=str, help='标题', location='form')
     parser.add_argument('year', type=str, help='年份', location='form')
     parser.add_argument('rssid', type=str, help='订阅ID', location='form')
@@ -1453,6 +1480,65 @@ class MediaInfo(ClientResource):
         识别媒体信息
         """
         return WebAction().api_action(cmd='media_info', data=self.parser.parse_args())
+
+
+@media.route('/detail')
+class MediaDetail(ClientResource):
+    parser = reqparse.RequestParser()
+    parser.add_argument('type', type=str, help='类型（MOV/TV）', location='form', required=True)
+    parser.add_argument('tmdbid', type=str, help='TMDBID/DB:豆瓣ID', location='form')
+
+    @media.doc(parser=parser)
+    def post(self):
+        """
+        查询TMDB媒体详情
+        """
+        return WebAction().api_action(cmd='media_detail', data=self.parser.parse_args())
+
+
+@media.route('/similar')
+class MediaSimilar(ClientResource):
+    parser = reqparse.RequestParser()
+    parser.add_argument('type', type=str, help='类型（MOV/TV）', location='form', required=True)
+    parser.add_argument('tmdbid', type=str, help='TMDBID', location='form')
+    parser.add_argument('page', type=int, help='页码', location='form')
+
+    @media.doc(parser=parser)
+    def post(self):
+        """
+        根据TMDBID查询类似媒体
+        """
+        return WebAction().api_action(cmd='media_similar', data=self.parser.parse_args())
+
+
+@media.route('/recommendations')
+class MediaRecommendations(ClientResource):
+    parser = reqparse.RequestParser()
+    parser.add_argument('type', type=str, help='类型（MOV/TV）', location='form', required=True)
+    parser.add_argument('tmdbid', type=str, help='TMDBID', location='form')
+    parser.add_argument('page', type=int, help='页码', location='form')
+
+    @media.doc(parser=parser)
+    def post(self):
+        """
+        根据TMDBID查询推荐媒体
+        """
+        return WebAction().api_action(cmd='media_recommendations', data=self.parser.parse_args())
+
+
+@media.route('/person')
+class MediaPersonList(ClientResource):
+    parser = reqparse.RequestParser()
+    parser.add_argument('type', type=str, help='类型（MOV/TV）', location='form', required=True)
+    parser.add_argument('personid', type=str, help='演员ID', location='form')
+    parser.add_argument('page', type=int, help='页码', location='form')
+
+    @media.doc(parser=parser)
+    def post(self):
+        """
+        查询TMDB演员参演作品
+        """
+        return WebAction().api_action(cmd='person_medias', data=self.parser.parse_args())
 
 
 @media.route('/subtitle/download')
@@ -1494,6 +1580,7 @@ class BrushTaskUpdate(ClientResource):
     parser.add_argument('brushtask_seedsize', type=int, help='上传量(GB)', location='form')
     parser.add_argument('brushtask_dltime', type=float, help='下载耗时(小时)', location='form')
     parser.add_argument('brushtask_avg_upspeed', type=int, help='平均上传速度(KB/S)', location='form')
+    parser.add_argument('brushtask_iatime', type=float, help='未活动时间(小时)', location='form')
     parser.add_argument('brushtask_pubdate', type=int, help='发布时间（小时）', location='form')
     parser.add_argument('brushtask_upspeed', type=int, help='上传限速（KB/S）', location='form')
     parser.add_argument('brushtask_downspeed', type=int, help='下载限速（KB/S）', location='form')
@@ -1533,7 +1620,7 @@ class BrushTaskInfo(ClientResource):
 
 
 @brushtask.route('/list')
-class BrushTasklist(ClientResource):
+class BrushTaskList(ClientResource):
     @staticmethod
     def post():
         """
@@ -1548,10 +1635,23 @@ class BrushTasklist(ClientResource):
         }
 
 
+@brushtask.route('/torrents')
+class BrushTaskTorrents(ClientResource):
+    parser = reqparse.RequestParser()
+    parser.add_argument('id', type=str, help='刷流任务ID', location='form', required=True)
+
+    @brushtask.doc(parser=parser)
+    def post(self):
+        """
+        查询刷流任务种子明细
+        """
+        return WebAction().api_action(cmd='list_brushtask_torrents', data=self.parser.parse_args())
+
+
 @brushtask.route('/downloader/update')
 class BrushTaskDownloaderUpdate(ClientResource):
     parser = reqparse.RequestParser()
-    parser.add_argument('test', type=bool, help='测试', location='form', required=True)
+    parser.add_argument('test', type=int, help='测试（0-否/1-是）', location='form', required=True)
     parser.add_argument('id', type=int, help='下载器ID', location='form')
     parser.add_argument('name', type=str, help='名称', location='form', required=True)
     parser.add_argument('type', type=str, help='类型（qbittorrent/transmission）', location='form', required=True)
@@ -1793,17 +1893,18 @@ class WordItemUpdate(ClientResource):
     parser = reqparse.RequestParser()
     parser.add_argument('id', type=int, help='识别词ID', location='form', required=True)
     parser.add_argument('gid', type=int, help='识别词组ID', location='form', required=True)
-    parser.add_argument('group_type', type=str, help='媒体类型（1/2）', location='form', required=True)
+    parser.add_argument('group_type', type=str, help='媒体类型（1-电影/2-电视剧）', location='form', required=True)
     parser.add_argument('new_replaced', type=str, help='被替换词', location='form')
     parser.add_argument('new_replace', type=str, help='替换词', location='form')
     parser.add_argument('new_front', type=str, help='前定位词', location='form')
     parser.add_argument('new_back', type=str, help='后定位词', location='form')
     parser.add_argument('new_offset', type=str, help='偏移集数', location='form')
     parser.add_argument('new_help', type=str, help='备注', location='form')
-    parser.add_argument('type', type=str, help='识别词类型（1/2/3/4）', location='form', required=True)
+    parser.add_argument('type', type=str, help='识别词类型（1-屏蔽/2-替换/3-替换+集偏移/4-集偏移）', location='form',
+                        required=True)
     parser.add_argument('season', type=str, help='季', location='form')
-    parser.add_argument('enabled', type=str, help='状态（1/0）', location='form', required=True)
-    parser.add_argument('regex', type=str, help='正则表达式（1/0）', location='form')
+    parser.add_argument('enabled', type=str, help='状态（1-启用/0-停用）', location='form', required=True)
+    parser.add_argument('regex', type=str, help='正则表达式（1-使用/0-不使用）', location='form')
 
     @words.doc(parser=parser)
     def post(self):
@@ -1889,7 +1990,7 @@ class WordItemImport(ClientResource):
     @words.doc(parser=parser)
     def post(self):
         """
-        分析识别词
+        导入识别词
         """
         return WebAction().api_action(cmd='import_custom_words', data=self.parser.parse_args())
 
@@ -1953,8 +2054,8 @@ class SyncDirectoryDelete(ClientResource):
 class SyncDirectoryStatus(ClientResource):
     parser = reqparse.RequestParser()
     parser.add_argument('sid', type=int, help='同步目录ID', location='form', required=True)
-    parser.add_argument('flag', type=int, help='操作（rename/enable）', location='form', required=True)
-    parser.add_argument('checked', type=bool, help='状态', location='form', required=True)
+    parser.add_argument('flag', type=str, help='操作（rename/enable）', location='form', required=True)
+    parser.add_argument('checked', type=int, help='状态（0-否/1-是）', location='form', required=True)
 
     @sync.doc(parser=parser)
     def post(self):
@@ -1972,3 +2073,206 @@ class SyncDirectoryList(ClientResource):
         查询所有同步目录
         """
         return WebAction().api_action(cmd='get_directorysync')
+
+
+@sync.route('/directory/run')
+class SyncDirectoryRun(ApiResource):
+    parser = reqparse.RequestParser()
+    parser.add_argument('sid', type=int, help='同步目录ID', location='args', required=True)
+
+    @sync.doc(parser=parser)
+    def get(self):
+        """
+        立即运行单个目录同步服务（密钥认证）
+        """
+        return WebAction().api_action(cmd='run_directory_sync', data=self.parser.parse_args())
+
+
+@sync.route('/run')
+class SyncRun(ApiResource):
+
+    @staticmethod
+    def get():
+        """
+        立即运行所有目录同步服务（密钥认证）
+        """
+        return WebAction().api_action(cmd='sch', data={"item": "sync"})
+
+
+@message.route('/client/update')
+class MessageClientUpdate(ClientResource):
+    parser = reqparse.RequestParser()
+    parser.add_argument('cid', type=int, help='ID', location='form')
+    parser.add_argument('name', type=str, help='名称', location='form', required=True)
+    parser.add_argument('type', type=str, help='类型（wechat/telegram/serverchan/bark/pushplus/iyuu/slack/gotify）',
+                        location='form', required=True)
+    parser.add_argument('config', type=str, help='配置项（JSON）', location='form', required=True)
+    parser.add_argument('switchs', type=list, help='开关', location='form', required=True)
+    parser.add_argument('interactive', type=int, help='是否开启交互（0/1）', location='form', required=True)
+    parser.add_argument('enabled', type=int, help='是否启用（0/1）', location='form', required=True)
+
+    @message.doc(parser=parser)
+    def post(self):
+        """
+        新增/修改通知消息服务渠道
+        """
+        return WebAction().api_action(cmd='update_message_client', data=self.parser.parse_args())
+
+
+@message.route('/client/delete')
+class MessageClientDelete(ClientResource):
+    parser = reqparse.RequestParser()
+    parser.add_argument('cid', type=int, help='ID', location='form', required=True)
+
+    @message.doc(parser=parser)
+    def post(self):
+        """
+        删除通知消息服务渠道
+        """
+        return WebAction().api_action(cmd='delete_message_client', data=self.parser.parse_args())
+
+
+@message.route('/client/status')
+class MessageClientStatus(ClientResource):
+    parser = reqparse.RequestParser()
+    parser.add_argument('flag', type=str, help='操作类型（interactive/enable）', location='form', required=True)
+    parser.add_argument('cid', type=int, help='ID', location='form', required=True)
+
+    @message.doc(parser=parser)
+    def post(self):
+        """
+        设置通知消息服务渠道状态
+        """
+        return WebAction().api_action(cmd='check_message_client', data=self.parser.parse_args())
+
+
+@message.route('/client/info')
+class MessageClientInfo(ClientResource):
+    parser = reqparse.RequestParser()
+    parser.add_argument('cid', type=int, help='ID', location='form', required=True)
+
+    @message.doc(parser=parser)
+    def post(self):
+        """
+        查询通知消息服务渠道设置
+        """
+        return WebAction().api_action(cmd='get_message_client', data=self.parser.parse_args())
+
+
+@message.route('/client/test')
+class MessageClientTest(ClientResource):
+    parser = reqparse.RequestParser()
+    parser.add_argument('type', type=str, help='类型（wechat/telegram/serverchan/bark/pushplus/iyuu/slack/gotify）',
+                        location='form', required=True)
+    parser.add_argument('config', type=str, help='配置（JSON）', location='form', required=True)
+
+    @message.doc(parser=parser)
+    def post(self):
+        """
+        测试通知消息服务配置正确性
+        """
+        return WebAction().api_action(cmd='test_message_client', data=self.parser.parse_args())
+
+
+@torrentremover.route('/task/info')
+class TorrentRemoverTaskInfo(ClientResource):
+    parser = reqparse.RequestParser()
+    parser.add_argument('tid', type=int, help='任务ID', location='form', required=True)
+
+    @torrentremover.doc(parser=parser)
+    def post(self):
+        """
+        查询自动删种任务详情
+        """
+        return WebAction().api_action(cmd='get_torrent_remove_task', data=self.parser.parse_args())
+
+
+@torrentremover.route('/task/list')
+class TorrentRemoverTaskList(ClientResource):
+    @staticmethod
+    @torrentremover.doc()
+    def post():
+        """
+        查询所有自动删种任务
+        """
+        return WebAction().api_action(cmd='get_torrent_remove_task')
+
+
+@torrentremover.route('/task/delete')
+class TorrentRemoverTaskDelete(ClientResource):
+    parser = reqparse.RequestParser()
+    parser.add_argument('tid', type=int, help='任务ID', location='form', required=True)
+
+    @torrentremover.doc(parser=parser)
+    def post(self):
+        """
+        删除自动删种任务
+        """
+        return WebAction().api_action(cmd='delete_torrent_remove_task', data=self.parser.parse_args())
+
+
+@torrentremover.route('/task/update')
+class TorrentRemoverTaskUpdate(ClientResource):
+    parser = reqparse.RequestParser()
+    parser.add_argument('tid', type=int, help='任务ID', location='form')
+    parser.add_argument('name', type=str, help='名称', location='form', required=True)
+    parser.add_argument('action', type=int, help='动作(1-暂停/2-删除种子/3-删除种子及文件)', location='form',
+                        required=True)
+    parser.add_argument('interval', type=int, help='运行间隔（分钟）', location='form', required=True)
+    parser.add_argument('enabled', type=int, help='状态（0-停用/1-启用）', location='form', required=True)
+    parser.add_argument('samedata', type=int, help='处理辅种（0-否/1-是）', location='form', required=True)
+    parser.add_argument('onlynastool', type=int, help='只管理NASTool添加的下载（0-否/1-是）', location='form',
+                        required=True)
+    parser.add_argument('ratio', type=float, help='分享率', location='form')
+    parser.add_argument('seeding_time', type=int, help='做种时间（小时）', location='form')
+    parser.add_argument('upload_avs', type=int, help='平均上传速度（KB/S）', location='form')
+    parser.add_argument('size', type=str, help='种子大小（GB）', location='form')
+    parser.add_argument('savepath_key', type=str, help='保存路径关键词', location='form')
+    parser.add_argument('tracker_key', type=str, help='tracker关键词', location='form')
+    parser.add_argument('downloader', type=str, help='下载器（Qb/Tr）', location='form')
+    parser.add_argument('qb_state', type=str, help='Qb种子状态（多个用;分隔）', location='form')
+    parser.add_argument('qb_category', type=str, help='Qb分类（多个用;分隔）', location='form')
+    parser.add_argument('tr_state', type=str, help='Tr种子状态（多个用;分隔）', location='form')
+    parser.add_argument('tr_error_key', type=str, help='Tr错误信息关键词', location='form')
+
+    @torrentremover.doc(parser=parser)
+    def post(self):
+        """
+        新增/修改自动删种任务
+        """
+        return WebAction().api_action(cmd='update_torrent_remove_task', data=self.parser.parse_args())
+
+
+@douban.route('/history/list')
+class DoubanHistoryList(ClientResource):
+
+    @staticmethod
+    def post():
+        """
+        查询豆瓣同步历史记录
+        """
+        return WebAction().api_action(cmd='get_douban_history')
+
+
+@douban.route('/history/delete')
+class DoubanHistoryDelete(ClientResource):
+    parser = reqparse.RequestParser()
+    parser.add_argument('id', type=int, help='ID', location='form', required=True)
+
+    @douban.doc(parser=parser)
+    def post(self):
+        """
+        删除豆瓣同步历史记录
+        """
+        return WebAction().api_action(cmd='delete_douban_history', data=self.parser.parse_args())
+
+
+@douban.route('/run')
+class DoubanRun(ClientResource):
+    @staticmethod
+    def post():
+        """
+        立即同步豆瓣数据
+        """
+        # 返回站点信息
+        return WebAction().api_action(cmd='sch', data={"item": "douban"})

@@ -1,22 +1,34 @@
 import log
+from app.utils import StringUtils
 from app.utils.types import DownloaderType
 from config import Config
-from app.downloader.client.client import IDownloadClient
-from app.downloader.client.py115 import Py115
+from app.downloader.client._base import _IDownloadClient
+from app.downloader.client._py115 import Py115
 
 
-class Client115(IDownloadClient):
+class Client115(_IDownloadClient):
+    schema = "client115"
+    client_type = DownloaderType.Client115.value
+    _client_config = {}
 
     downclient = None
     lasthash = None
-    client_type = DownloaderType.Client115.value
 
-    def get_config(self):
-        # 读取配置文件
-        config = Config()
-        cloudconfig = config.get_config('client115')
-        if cloudconfig:
-            self.downclient = Py115(cloudconfig.get("cookie"))
+    def __init__(self, config=None):
+        if config:
+            self._client_config = config
+        else:
+            self._client_config = Config().get_config('client115')
+        self.init_config()
+        self.connect()
+
+    def init_config(self):
+        if self._client_config:
+            self.downclient = Py115(self._client_config.get("cookie"))
+
+    @classmethod
+    def match(cls, ctype):
+        return True if ctype in [cls.schema, cls.client_type] else False
 
     def connect(self):
         self.downclient.login()
@@ -30,7 +42,7 @@ class Client115(IDownloadClient):
             return False
         return True
 
-    def get_torrents(self, ids=None, status=None, tag=None):
+    def get_torrents(self, ids=None, status=None, **kwargs):
         tlist = []
         if not self.downclient:
             return tlist
@@ -91,11 +103,39 @@ class Client115(IDownloadClient):
     def stop_torrents(self, ids):
         pass
 
-    def set_torrents_status(self, ids):
+    def set_torrents_status(self, ids, **kwargs):
         return self.delete_torrents(ids=ids, delete_file=False)
 
     def get_download_dirs(self):
         return []
 
     def change_torrent(self, **kwargs):
+        pass
+
+    def get_downloading_progress(self, **kwargs):
+        """
+        获取正在下载的种子进度
+        """
+        Torrents = self.get_downloading_torrents()
+        DispTorrents = []
+        for torrent in Torrents:
+            # 进度
+            progress = round(torrent.get('percentDone'), 1)
+            state = "Downloading"
+            _dlspeed = StringUtils.str_filesize(torrent.get('peers'))
+            _upspeed = StringUtils.str_filesize(torrent.get('rateDownload'))
+            speed = "%s%sB/s %s%sB/s" % (chr(8595), _dlspeed, chr(8593), _upspeed)
+            DispTorrents.append({
+                'id': torrent.get('info_hash'),
+                'name': torrent.get('name'),
+                'speed': speed,
+                'state': state,
+                'progress': progress
+            })
+        return DispTorrents
+
+    def set_speed_limit(self, **kwargs):
+        """
+        设置速度限制
+        """
         pass

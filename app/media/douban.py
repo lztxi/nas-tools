@@ -5,12 +5,12 @@ from time import sleep
 import zhconv
 
 from app.utils.commons import singleton
-from app.utils.string_utils import StringUtils
+from app.utils import ExceptionUtils, StringUtils
 
 import log
 from config import Config
 from app.media.doubanapi import DoubanApi, DoubanWeb
-from app.media import MetaInfo
+from app.media.meta import MetaInfo
 from app.utils import RequestUtils
 from app.utils.types import MediaType
 
@@ -23,17 +23,16 @@ class DouBan:
     doubanapi = None
     doubanweb = None
     message = None
-    __movie_num = 30
-    __tv_num = 30
+    _movie_num = 20
+    _tv_num = 20
 
     def __init__(self):
-        self.doubanapi = DoubanApi()
-        self.doubanweb = DoubanWeb()
         self.init_config()
 
     def init_config(self):
-        config = Config()
-        douban = config.get_config('douban')
+        self.doubanapi = DoubanApi()
+        self.doubanweb = DoubanWeb()
+        douban = Config().get_config('douban')
         if douban:
             # Cookie
             self.cookie = douban.get('cookie')
@@ -43,6 +42,7 @@ class DouBan:
                     if res:
                         self.cookie = StringUtils.str_from_cookiejar(res.cookies)
                 except Exception as err:
+                    ExceptionUtils.exception_traceback(err)
                     log.warn(f"【Douban】获取cookie失败：{format(err)}")
 
     def get_douban_detail(self, doubanid, mtype=None, wait=False):
@@ -132,7 +132,7 @@ class DouBan:
                 douban_info["actors"] = celebrities.get("actors")
             return douban_info
 
-    def get_douban_wish(self, dtype, userid, page, wait=False):
+    def get_douban_wish(self, dtype, userid, start, wait=False):
         """
         获取豆瓣想看列表数据
         """
@@ -141,18 +141,25 @@ class DouBan:
             log.info("【Douban】随机休眠：%s 秒" % time)
             sleep(time)
         if dtype == "do":
-            web_infos = self.doubanweb.do(cookie=self.cookie, userid=userid, start=page)
+            web_infos = self.doubanweb.do(cookie=self.cookie, userid=userid, start=start)
         elif dtype == "collect":
-            web_infos = self.doubanweb.collect(cookie=self.cookie, userid=userid, start=page)
+            web_infos = self.doubanweb.collect(cookie=self.cookie, userid=userid, start=start)
         else:
-            web_infos = self.doubanweb.wish(cookie=self.cookie, userid=userid, start=page)
+            web_infos = self.doubanweb.wish(cookie=self.cookie, userid=userid, start=start)
         if not web_infos:
             return []
         for web_info in web_infos:
             web_info["id"] = web_info.get("url").split("/")[-2]
         return web_infos
 
-    def search_douban_medias(self, keyword, mtype: MediaType = None, num=20, season=None, episode=None):
+    def get_user_info(self, userid, wait=False):
+        if wait:
+            time = round(random.uniform(1, 5), 1)
+            log.info("【Douban】随机休眠：%s 秒" % time)
+            sleep(time)
+        return self.doubanweb.user(cookie=self.cookie, userid=userid)
+
+    def search_douban_medias(self, keyword, mtype: MediaType = None, season=None, episode=None, page=1):
         """
         根据关键字搜索豆瓣，返回可能的标题和年份信息
         """
@@ -194,7 +201,7 @@ class DouBan:
             if meta_info not in ret_medias:
                 ret_medias.append(meta_info)
 
-        return ret_medias[:num]
+        return ret_medias[(page - 1) * 20:page * 20]
 
     def get_media_detail_from_web(self, doubanid):
         """
@@ -266,7 +273,7 @@ class DouBan:
             if imdbid:
                 ret_media['imdbid'] = str(imdbid).strip()
         except Exception as err:
-            print(str(err))
+            ExceptionUtils.exception_traceback(err)
         if ret_media:
             log.info("【Douban】查询到数据：%s" % ret_media.get("title"))
         else:
@@ -276,126 +283,160 @@ class DouBan:
     def get_douban_online_movie(self, page=1):
         if not self.doubanapi:
             return []
-        infos = self.doubanapi.movie_showing(start=(page - 1) * self.__movie_num, count=self.__movie_num)
+        infos = self.doubanapi.movie_showing(start=(page - 1) * self._movie_num,
+                                             count=self._movie_num)
         if not infos:
             return []
-        return self.__refresh_movie(infos.get("subject_collection_items"))
+        return self.__dict_items(infos.get("subject_collection_items"))
 
     def get_douban_hot_movie(self, page=1):
         if not self.doubanapi:
             return []
-        infos = self.doubanapi.movie_hot_gaia(start=(page - 1) * self.__movie_num, count=self.__movie_num)
+        infos = self.doubanapi.movie_hot_gaia(start=(page - 1) * self._movie_num,
+                                              count=self._movie_num)
         if not infos:
             return []
-        return self.__refresh_movie(infos.get("subject_collection_items"))
+        return self.__dict_items(infos.get("subject_collection_items"))
 
     def get_douban_hot_anime(self, page=1):
         if not self.doubanapi:
             return []
-        infos = self.doubanapi.tv_animation(start=(page - 1) * self.__tv_num, count=self.__tv_num)
+        infos = self.doubanapi.tv_animation(start=(page - 1) * self._tv_num,
+                                            count=self._tv_num)
         if not infos:
             return []
-        return self.__refresh_tv(infos.get("subject_collection_items"))
+        return self.__dict_items(infos.get("subject_collection_items"))
 
     def get_douban_hot_tv(self, page=1):
         if not self.doubanapi:
             return []
-        infos = self.doubanapi.tv_hot(start=(page - 1) * self.__tv_num, count=self.__tv_num)
+        infos = self.doubanapi.tv_hot(start=(page - 1) * self._tv_num,
+                                      count=self._tv_num)
         if not infos:
             return []
-        return self.__refresh_tv(infos.get("subject_collection_items"))
+        return self.__dict_items(infos.get("subject_collection_items"))
 
     def get_douban_new_movie(self, page=1):
         if not self.doubanapi:
             return []
-        infos = self.doubanapi.movie_soon(start=(page - 1) * self.__movie_num, count=self.__movie_num)
+        infos = self.doubanapi.movie_soon(start=(page - 1) * self._movie_num,
+                                          count=self._movie_num)
         if not infos:
             return []
-        return self.__refresh_movie(infos.get("subject_collection_items"))
+        return self.__dict_items(infos.get("subject_collection_items"))
 
     def get_douban_hot_show(self, page=1):
         if not self.doubanapi:
             return []
-        infos = self.doubanapi.show_hot(start=(page - 1) * self.__tv_num, count=self.__tv_num)
+        infos = self.doubanapi.show_hot(start=(page - 1) * self._tv_num,
+                                        count=self._tv_num)
         if not infos:
             return []
-        return self.__refresh_tv(infos.get("subject_collection_items"))
+        return self.__dict_items(infos.get("subject_collection_items"))
 
     def get_douban_top250_movie(self, page=1):
         if not self.doubanapi:
             return []
-        infos = self.doubanapi.movie_top250(start=(page - 1) * self.__movie_num, count=self.__movie_num)
+        infos = self.doubanapi.movie_top250(start=(page - 1) * self._movie_num,
+                                            count=self._movie_num)
         if not infos:
             return []
-        return self.__refresh_movie(infos.get("subject_collection_items"))
+        return self.__dict_items(infos.get("subject_collection_items"))
+
+    def get_douban_chinese_weekly_tv(self, page=1):
+        if not self.doubanapi:
+            return []
+        infos = self.doubanapi.tv_chinese_best_weekly(start=(page - 1) * self._tv_num,
+                                                      count=self._tv_num)
+        if not infos:
+            return []
+        return self.__dict_items(infos.get("subject_collection_items"))
+
+    def get_douban_weekly_tv_global(self, page=1):
+        if not self.doubanapi:
+            return []
+        infos = self.doubanapi.tv_global_best_weekly(start=(page - 1) * self._tv_num,
+                                                     count=self._tv_num)
+        if not infos:
+            return []
+        return self.__dict_items(infos.get("subject_collection_items"))
+
+    def get_douban_disover(self, mtype, sort, tags, page=1):
+        if not self.doubanapi:
+            return []
+        if mtype == MediaType.MOVIE:
+            infos = self.doubanapi.movie_recommend(start=(page - 1) * self._movie_num,
+                                                   count=self._movie_num,
+                                                   sort=sort,
+                                                   tags=tags)
+        else:
+            infos = self.doubanapi.tv_recommend(start=(page - 1) * self._tv_num,
+                                                count=self._tv_num,
+                                                sort=sort,
+                                                tags=tags)
+        if not infos:
+            return []
+        return self.__dict_items(infos.get("items"))
 
     @staticmethod
-    def __refresh_movie(infos):
-        if not infos:
-            return []
-        ret_list = []
+    def __dict_items(infos, media_type=None):
+        """
+        转化为字典
+        """
+        # ID
+        ret_infos = []
         for info in infos:
-            try:
-                if not info:
+            rid = info.get("id")
+            # 评分
+            rating = info.get('rating')
+            if rating:
+                vote_average = float(rating.get("value"))
+            else:
+                vote_average = 0
+            # 标题
+            title = info.get('title')
+            # 年份
+            year = info.get('year')
+
+            if not media_type:
+                if info.get("type") not in ("movie", "tv"):
                     continue
-                # ID
-                rid = info.get("id")
-                # 评分
-                rating = info.get('rating')
-                if rating:
-                    vote_average = float(rating.get("value"))
-                else:
-                    vote_average = 0
-                # 年份
-                year = info.get('year')
+                mtype = MediaType.MOVIE if info.get("type") == "movie" else MediaType.TV
+            else:
+                mtype = media_type
+
+            if mtype == MediaType.MOVIE:
+                type_str = "MOV"
                 # 海报
                 poster_path = info.get('cover', {}).get("url")
                 if not poster_path:
                     poster_path = info.get('cover_url')
-                # 标题
-                title = info.get('title')
-                if not title or not poster_path:
-                    continue
-                # 简介
-                overview = info.get("card_subtitle") or ""
-                if not year and overview:
-                    if overview.split("/")[0].strip().isdigit():
-                        year = overview.split("/")[0].strip()
-                ret_list.append({'id': rid, 'title': title, 'release_date': year, 'vote_average': vote_average,
-                                 'poster_path': poster_path, 'overview': overview})
-            except Exception as e:
-                print(str(e))
-        return ret_list
-
-    @staticmethod
-    def __refresh_tv(infos):
-        if not infos:
-            return []
-        ret_list = []
-        for info in infos:
-            try:
-                if not info:
-                    continue
-                # ID
-                rid = info.get("id")
-                # 评分
-                rating = info.get('rating')
-                if rating:
-                    vote_average = float(rating.get("value"))
-                else:
-                    vote_average = 0
-                # 年份
-                year = info.get('year')
+                if not poster_path:
+                    poster_path = info.get('pic', {}).get("large")
+            else:
+                type_str = "TV"
                 # 海报
                 poster_path = info.get('pic', {}).get("normal")
-                # 标题
-                title = info.get('title')
-                if not title or not poster_path:
-                    continue
-                # 简介
-                overview = info.get("comment") or ""
-                ret_list.append({'id': rid, 'name': title, 'first_air_date': year, 'vote_average': vote_average,
-                                 'poster_path': poster_path, 'overview': overview})
-            except Exception as e:
-                print(str(e))
-        return ret_list
+
+            # 简介
+            overview = info.get("card_subtitle") or ""
+            if not year and overview:
+                if overview.split("/")[0].strip().isdigit():
+                    year = overview.split("/")[0].strip()
+
+            # 高清海报
+            if poster_path:
+                poster_path = poster_path.replace("s_ratio_poster", "m_ratio_poster")
+
+            ret_infos.append({
+                'id': "DB:%s" % rid,
+                'orgid': rid,
+                'title': title,
+                'type': type_str,
+                'media_type': mtype.value,
+                'year': year[:4] if year else "",
+                'vote': vote_average,
+                'image': poster_path,
+                'overview': overview
+            })
+        return ret_infos

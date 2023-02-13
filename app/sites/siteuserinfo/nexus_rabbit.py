@@ -1,11 +1,26 @@
 # -*- coding: utf-8 -*-
 import json
 
+from lxml import etree
+
+from app.sites.siteuserinfo._base import SITE_BASE_ORDER
 from app.sites.siteuserinfo.nexus_php import NexusPhpSiteUserInfo
+from app.utils.exception_utils import ExceptionUtils
+from app.utils.types import SiteSchema
 
 
 class NexusRabbitSiteUserInfo(NexusPhpSiteUserInfo):
-    _site_schema = "NexusRabbit"
+    schema = SiteSchema.NexusRabbit
+    order = SITE_BASE_ORDER + 5
+
+    @classmethod
+    def match(cls, html_text):
+        html = etree.HTML(html_text)
+        if not html:
+            return False
+
+        printable_text = html.xpath("string(.)") if html else ""
+        return 'Style by Rabbit' in printable_text
 
     def _parse_site_page(self, html_text):
         super()._parse_site_page(html_text)
@@ -23,7 +38,7 @@ class NexusRabbitSiteUserInfo(NexusPhpSiteUserInfo):
         try:
             torrents = json.loads(html_text).get('data')
         except Exception as e:
-            print(str(e))
+            ExceptionUtils.exception_traceback(e)
             return
 
         page_seeding_size = 0

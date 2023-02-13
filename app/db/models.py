@@ -94,6 +94,11 @@ class CONFIGUSERRSS(Base):
     STATE = Column(Text)
     SAVE_PATH = Column(Text)
     DOWNLOAD_SETTING = Column(Integer)
+    RECOGNIZATION = Column(Text)
+    OVER_EDITION = Column(Integer)
+    SITES = Column(Text)
+    FILTER_ARGS = Column(Text)
+    MEDIAINFOS = Column(Text)
     NOTE = Column(Text)
 
 
@@ -140,6 +145,10 @@ class DOUBANMEDIAS(Base):
     RATING = Column(Text)
     IMAGE = Column(Text)
     STATE = Column(Text)
+    ADD_TIME = Column(Text)
+
+    def as_dict(self):
+        return {c.name: getattr(self, c.name) for c in self.__table__.columns}
 
 
 class DOWNLOADHISTORY(Base):
@@ -176,6 +185,20 @@ class DOWNLOADSETTING(Base):
     DOWNLOAD_LIMIT = Column(Integer)
     RATIO_LIMIT = Column(Integer)
     SEEDING_TIME_LIMIT = Column(Integer)
+    DOWNLOADER = Column(Text)
+    NOTE = Column(Text)
+
+
+class MESSAGECLIENT(Base):
+    __tablename__ = 'MESSAGE_CLIENT'
+
+    ID = Column(Integer, Sequence('ID'), primary_key=True)
+    NAME = Column(Text)
+    TYPE = Column(Text)
+    CONFIG = Column(Text)
+    SWITCHS = Column(Text)
+    INTERACTIVE = Column(Integer)
+    ENABLED = Column(Integer)
     NOTE = Column(Text)
 
 
@@ -206,10 +229,23 @@ class RSSMOVIES(Base):
     ID = Column(Integer, Sequence('ID'), primary_key=True)
     NAME = Column(Text, index=True)
     YEAR = Column(Text)
+    KEYWORD = Column(Text)
     TMDBID = Column(Text)
     IMAGE = Column(Text)
-    DESC = Column(Text)
+    RSS_SITES = Column(Text)
+    SEARCH_SITES = Column(Text)
+    OVER_EDITION = Column(Integer)
+    FILTER_ORDER = Column(Integer)
+    FILTER_RESTYPE = Column(Text)
+    FILTER_PIX = Column(Text)
+    FILTER_RULE = Column(Integer)
+    FILTER_TEAM = Column(Text)
+    SAVE_PATH = Column(Text)
+    DOWNLOAD_SETTING = Column(Integer)
+    FUZZY_MATCH = Column(Integer)
     STATE = Column(Text)
+    DESC = Column(Text)
+    NOTE = Column(Text)
 
     def as_dict(self):
         return {c.name: getattr(self, c.name) for c in self.__table__.columns}
@@ -237,13 +273,28 @@ class RSSTVS(Base):
     ID = Column(Integer, Sequence('ID'), primary_key=True)
     NAME = Column(Text, index=True)
     YEAR = Column(Text)
+    KEYWORD = Column(Text)
     SEASON = Column(Text)
     TMDBID = Column(Text)
     IMAGE = Column(Text)
-    DESC = Column(Text)
+    RSS_SITES = Column(Text)
+    SEARCH_SITES = Column(Text)
+    OVER_EDITION = Column(Integer)
+    FILTER_ORDER = Column(Integer)
+    FILTER_RESTYPE = Column(Text)
+    FILTER_PIX = Column(Text)
+    FILTER_RULE = Column(Integer)
+    FILTER_TEAM = Column(Text)
+    SAVE_PATH = Column(Text)
+    DOWNLOAD_SETTING = Column(Integer)
+    FUZZY_MATCH = Column(Integer)
+    TOTAL_EP = Column(Integer)
+    CURRENT_EP = Column(Integer)
     TOTAL = Column(Integer)
     LACK = Column(Integer)
     STATE = Column(Text)
+    DESC = Column(Text)
+    NOTE = Column(Text)
 
     def as_dict(self):
         return {c.name: getattr(self, c.name) for c in self.__table__.columns}
@@ -255,6 +306,21 @@ class RSSTVEPISODES(Base):
     ID = Column(Integer, Sequence('ID'), primary_key=True)
     RSSID = Column(Text, index=True)
     EPISODES = Column(Text)
+
+
+class TORRENTREMOVETASK(Base):
+    __tablename__ = 'TORRENT_REMOVE_TASK'
+
+    ID = Column(Integer, Sequence('ID'), primary_key=True)
+    NAME = Column(Text)
+    ACTION = Column(Integer)
+    INTERVAL = Column(Integer)
+    ENABLED = Column(Integer)
+    SAMEDATA = Column(Integer)
+    ONLYNASTOOL = Column(Integer)
+    DOWNLOADER = Column(Text)
+    CONFIG = Column(Text)
+    NOTE = Column(Text)
 
 
 class SEARCHRESULTINFO(Base):
@@ -323,6 +389,8 @@ class SITEBRUSHTASK(Base):
     REMOVE_COUNT = Column(Text)
     DOWNLOAD_SIZE = Column(Text)
     UPLOAD_SIZE = Column(Text)
+    SENDMESSAGE = Column(Text)
+    FORCEUPLOAD = Column(Text)
     STATE = Column(Text)
     LST_MOD_DATE = Column(Text)
 
@@ -338,6 +406,9 @@ class SITEBRUSHTORRENTS(Base):
     DOWNLOADER = Column(Text)
     DOWNLOAD_ID = Column(Text)
     LST_MOD_DATE = Column(Text)
+
+    def as_dict(self):
+        return {c.name: getattr(self, c.name) for c in self.__table__.columns}
 
 
 class SITESTATISTICSHISTORY(Base):
@@ -381,9 +452,16 @@ class SITEUSERINFOSTATS(Base):
     SEEDING_SIZE = Column(Integer)
     BONUS = Column(Float)
     URL = Column(Text, unique=True)
-    FAVICON = Column(Text)
     MSG_UNREAD = Column(Integer)
     EXT_INFO = Column(Text)
+
+
+class SITEFAVICON(Base):
+    __tablename__ = 'SITE_FAVICON'
+
+    SITE = Column(Text, primary_key=True)
+    URL = Column(Text)
+    FAVICON = Column(Text)
 
 
 class SITEUSERSEEDINGINFO(Base):
@@ -429,16 +507,19 @@ class TRANSFERHISTORY(Base):
     __tablename__ = 'TRANSFER_HISTORY'
 
     ID = Column(Integer, Sequence('ID'), primary_key=True)
-    SOURCE = Column(Text)
     MODE = Column(Text)
     TYPE = Column(Text)
-    FILE_PATH = Column(Text, index=True)
-    FILE_NAME = Column(Text, index=True)
-    TITLE = Column(Text, index=True)
     CATEGORY = Column(Text)
+    TMDBID = Column(Integer)
+    TITLE = Column(Text, index=True)
     YEAR = Column(Text)
-    SE = Column(Text)
+    SEASON_EPISODE = Column(Text)
+    SOURCE = Column(Text)
+    SOURCE_PATH = Column(Text, index=True)
+    SOURCE_FILENAME = Column(Text, index=True)
     DEST = Column(Text)
+    DEST_PATH = Column(Text)
+    DEST_FILENAME = Column(Text)
     DATE = Column(Text)
 
     def as_dict(self):
@@ -451,6 +532,7 @@ class TRANSFERUNKNOWN(Base):
     ID = Column(Integer, Sequence('ID'), primary_key=True)
     PATH = Column(Text, index=True)
     DEST = Column(Text)
+    MODE = Column(Text)
     STATE = Column(Text, index=True)
 
 

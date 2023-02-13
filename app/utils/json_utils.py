@@ -18,7 +18,7 @@ class JsonUtils:
             try:
                 return o.__dict__
             except Exception as err:
-                print(err)
+                print(str(err))
                 return str(o)
 
         return json.loads(json.dumps(obj, default=lambda o: _try(o)))

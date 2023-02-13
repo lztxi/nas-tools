@@ -1,13 +1,9 @@
 import os
 import shutil
+import sys
 from threading import Lock
-
 import ruamel.yaml
 
-# 菜单对应关系，配置WeChat应用中配置的菜单ID与执行命令的对应关系，需要手工修改
-# 菜单序号在https://work.weixin.qq.com/wework_admin/frame#apps 应用自定义菜单中维护，然后看日志输出的菜单序号是啥（按顺利能猜到的）....
-# 命令对应关系：/ptt 下载文件转移；/ptr 删种；/pts 站点签到；/rst 目录同步；/rss RSS下载
-WECHAT_MENU = {'_0_0': '/ptt', '_0_1': '/ptr', '_0_2': '/rss', '_1_0': '/rst', '_1_1': '/db', '_2_0': '/pts'}
 # 种子名/文件名要素分隔字符
 SPLIT_CHARS = r"\.|\s+|\(|\)|\[|]|-|\+|【|】|/|～|;|&|\||#|_|「|」|（|）|~"
 # 默认User-Agent
@@ -15,8 +11,10 @@ DEFAULT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 # 收藏了的媒体的目录名，名字可以改，在Emby中点击红星则会自动将电影转移到此分类下，需要在Emby Webhook中配置用户行为通知
 RMT_FAVTYPE = '精选'
 # 支持的媒体文件后缀格式
-RMT_MEDIAEXT = ['.mp4', '.mkv', '.ts', '.iso', '.rmvb', '.avi', '.mov', '.mpeg', '.mpg', '.wmv', '.3gp', '.asf', '.m4v',
-                '.flv', '.m2ts']
+RMT_MEDIAEXT = ['.mp4', '.mkv', '.ts', '.iso',
+                '.rmvb', '.avi', '.mov', '.mpeg',
+                '.mpg', '.wmv', '.3gp', '.asf',
+                '.m4v', '.flv', '.m2ts', '.strm']
 # 支持的字幕文件后缀格式
 RMT_SUBEXT = ['.srt', '.ass', '.ssa']
 # 电视剧动漫的分类genre_ids
@@ -51,33 +49,18 @@ DEFAULT_TMDB_IMAGE = 'https://s3.bmp.ovh/imgs/2022/07/10/77ef9500c851935b.webp'
 # 默认微信消息代理服务器地址
 DEFAULT_WECHAT_PROXY = 'https://wechat.nastool.cn'
 # 默认OCR识别服务地址
-DEFAULT_OCR_SERVER = 'https://nastool.cn/ocr/'
+DEFAULT_OCR_SERVER = 'https://nastool.cn'
 # 默认TMDB代理服务地址
 DEFAULT_TMDB_PROXY = 'https://tmdb.nastool.cn'
+# 默认CookieCloud服务地址
+DEFAULT_COOKIECLOUD_SERVER = 'http://nastool.cn:8088'
 # TMDB图片地址
 TMDB_IMAGE_W500_URL = 'https://image.tmdb.org/t/p/w500%s'
-TMDB_IMAGE_ORIGINAL_URL = 'https://image.tmdb.org/t/p/original/%s'
+TMDB_IMAGE_ORIGINAL_URL = 'https://image.tmdb.org/t/p/original%s'
+TMDB_IMAGE_FACE_URL = 'https://image.tmdb.org/t/p/h632%s'
+TMDB_PEOPLE_PROFILE_URL = 'https://www.themoviedb.org/person/%s'
 # 添加下载时增加的标签，开始只监控NASTool添加的下载时有效
 PT_TAG = "NASTOOL"
-# 搜索种子过滤属性
-TORRENT_SEARCH_PARAMS = {
-    "restype": {
-        "BLURAY": r"Blu-?Ray|BD|BDRIP",
-        "REMUX": r"REMUX",
-        "DOLBY": r"DOLBY",
-        "WEB": r"WEB-?DL|WEBRIP",
-        "HDTV": r"U?HDTV",
-        "UHD": r"UHD",
-        "HDR": r"HDR",
-        "3D": r"3D"
-    },
-    "pix": {
-        "8k": r"8K",
-        "4k": r"4K|2160P|X2160",
-        "1080p": r"1080[PIX]|X1080",
-        "720p": r"720P"
-    }
-}
 # 电影默认命名格式
 DEFAULT_MOVIE_FORMAT = '{title} ({year})/{title} ({year})-{part} - {videoFormat}'
 # 电视剧默认命名格式
@@ -88,53 +71,50 @@ KEYWORD_SEARCH_WEIGHT_2 = [10, 2, 1]
 KEYWORD_SEARCH_WEIGHT_3 = [10, 2]
 KEYWORD_STR_SIMILARITY_THRESHOLD = 0.2
 KEYWORD_DIFF_SCORE_THRESHOLD = 30
-KEYWORD_BLACKLIST = ['中字', '韩语', '双字', '中英', '日语', '双语', '国粤', 'HD', 'BD', '中日', '粤语', '完全版', '法语',
-                     '西班牙语', 'HRHDTVAC3264', '未删减版', '未删减', '国语', '字幕组', '人人影视', 'www66ystv',
+KEYWORD_BLACKLIST = ['中字', '韩语', '双字', '中英', '日语', '双语', '国粤', 'HD', 'BD', '中日', '粤语', '完全版',
+                     '法语', '西班牙语', 'HRHDTVAC3264', '未删减版', '未删减', '国语', '字幕组', '人人影视', 'www66ystv',
                      '人人影视制作', '英语', 'www6vhaotv', '无删减版', '完成版', '德意']
-#  网络测试对象
-NETTEST_TARGETS = ["www.themoviedb.org",
-                   "api.themoviedb.org",
-                   "api.tmdb.org",
-                   "image.tmdb.org",
-                   "webservice.fanart.tv",
-                   "api.telegram.org",
-                   "qyapi.weixin.qq.com",
-                   "www.opensubtitles.org"]
 
-# 站点签到支持的识别XPATH
-SITE_CHECKIN_XPATH = [
-    '//a[@id="signed"]',
-    '//a[contains(@href, "attendance.php")]',
-    '//a[contains(text(), "签到")]',
-    '//a/b[contains(text(), "签 到")]',
-    '//span[@id="sign_in"]/a',
-    '//a[contains(@href, "addbonus")]',
-    '//input[@class="dt_button"][contains(@value, "打卡")]',
-    '//a[contains(@href, "sign_in")]'
+# WebDriver路径
+WEBDRIVER_PATH = {
+    "Docker": "/usr/lib/chromium/chromedriver",
+    "Synology": "/var/packages/NASTool/target/bin/chromedriver"
+}
+
+# Xvfb虚拟显示路程
+XVFB_PATH = [
+    "/usr/bin/Xvfb",
+    "/usr/local/bin/Xvfb"
 ]
 
 # 线程锁
 lock = Lock()
 
+# 全局实例
+_CONFIG = None
 
+
+def singleconfig(cls):
+    def _singleconfig(*args, **kwargs):
+        global _CONFIG
+        if not _CONFIG:
+            with lock:
+                _CONFIG = cls(*args, **kwargs)
+        return _CONFIG
+
+    return _singleconfig
+
+
+@singleconfig
 class Config(object):
-    _INSTANSE = None
-    _INSTANSE_FLAG = False
     _config = {}
     _config_path = None
 
-    def __new__(cls, *args, **kwargs):
-        with lock:
-            if not cls._INSTANSE:
-                cls._INSTANSE = super().__new__(cls)
-            return cls._INSTANSE
-
     def __init__(self):
-        with lock:
-            if Config._INSTANSE_FLAG:
-                return
-            Config._INSTANSE_FLAG = True
         self._config_path = os.environ.get('NASTOOL_CONFIG')
+        if not os.environ.get('TZ'):
+            os.environ['TZ'] = 'Asia/Shanghai'
+        self.init_syspath()
         self.init_config()
 
     def init_config(self):
@@ -147,17 +127,27 @@ class Config(object):
                 cfg_tp_path = cfg_tp_path.replace("\\", "/")
                 shutil.copy(cfg_tp_path, self._config_path)
                 print("【Config】config.yaml 配置文件不存在，已将配置文件模板复制到配置目录...")
-            with open(self._config_path, mode='r', encoding='utf-8') as f:
+            with open(self._config_path, mode='r', encoding='utf-8') as cf:
                 try:
                     # 读取配置
-                    print("正在加载配置...")
-                    self._config = ruamel.yaml.YAML().load(f)
+                    print("正在加载配置：%s" % self._config_path)
+                    self._config = ruamel.yaml.YAML().load(cf)
                 except Exception as e:
                     print("【Config】配置文件 config.yaml 格式出现严重错误！请检查：%s" % str(e))
                     self._config = {}
         except Exception as err:
             print("【Config】加载 config.yaml 配置出错：%s" % str(err))
             return False
+
+    def init_syspath(self):
+        with open(os.path.join(self.get_root_path(),
+                               "third_party.txt"), "r") as f:
+            for third_party_lib in f.readlines():
+                module_path = os.path.join(self.get_root_path(),
+                                           "third_party",
+                                           third_party_lib.strip()).replace("\\", "/")
+                if module_path not in sys.path:
+                    sys.path.append(module_path)
 
     def get_proxies(self):
         return self.get_config('app').get("proxies")
@@ -172,12 +162,15 @@ class Config(object):
 
     def save_config(self, new_cfg):
         self._config = new_cfg
-        with open(self._config_path, mode='w', encoding='utf-8') as f:
+        with open(self._config_path, mode='w', encoding='utf-8') as sf:
             yaml = ruamel.yaml.YAML()
-            return yaml.dump(new_cfg, f)
+            return yaml.dump(new_cfg, sf)
 
     def get_config_path(self):
         return os.path.dirname(self._config_path)
+
+    def get_temp_path(self):
+        return os.path.join(self.get_config_path(), "temp")
 
     @staticmethod
     def get_root_path():
@@ -185,3 +178,16 @@ class Config(object):
 
     def get_inner_config_path(self):
         return os.path.join(self.get_root_path(), "config")
+
+    def get_script_path(self):
+        return os.path.join(self.get_inner_config_path(), "scripts")
+
+    def get_domain(self):
+        domain = (self.get_config('app') or {}).get('domain')
+        if domain and not domain.startswith('http'):
+            domain = "http://" + domain
+        return domain
+
+    @staticmethod
+    def get_timezone():
+        return os.environ.get('TZ')

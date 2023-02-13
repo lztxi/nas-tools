@@ -1,11 +1,12 @@
 ---
 name: 问题模板
-about: 如发现Bug，请按此模板提交issues，不按模板提交的问题将直接关闭
+about: 如发现Bug，请按此模板提交issues，不按模板提交的问题将直接关闭。
+提交问题务必描述清楚、附上日志，描述不清导致无法理解和分析的问题也可能会被直接关闭。
 ---
 
-## 你使用的 NASTool 是什么版本，什么环境？
+## 你使用的 NAStool 是什么版本，什么环境？
 
-> NASTool 版本: vx.x.x
+> NAStool 版本: vx.x.x
 >
 > 环境: docker or windows or Synology
 >
@@ -26,4 +27,4 @@ about: 如发现Bug，请按此模板提交issues，不按模板提交的问题�
 ## 给出程序界面截图、后台运行日志或配置文件
 
 > 如UI BUG请提供截图及配置文件截图
-> 其它问题提供后台日志，如为Docker请提供 logs/supervisor 目录下的日志
+> 其它问题提供后台日志，如为Docker请提供docker的日志

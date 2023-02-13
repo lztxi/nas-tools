@@ -3,12 +3,24 @@ import re
 
 from lxml import etree
 
-from app.sites.siteuserinfo.site_user_info import ISiteUserInfo
+from app.sites.siteuserinfo._base import _ISiteUserInfo, SITE_BASE_ORDER
 from app.utils import StringUtils
+from app.utils.types import SiteSchema
 
 
-class GazelleSiteUserInfo(ISiteUserInfo):
-    _site_schema = "Gazelle"
+class GazelleSiteUserInfo(_ISiteUserInfo):
+    schema = SiteSchema.Gazelle
+    order = SITE_BASE_ORDER
+
+    @classmethod
+    def match(cls, html_text):
+        html = etree.HTML(html_text)
+        if not html:
+            return False
+
+        printable_text = html.xpath("string(.)") if html else ""
+
+        return "Powered by Gazelle" in printable_text or "DIC Music" in printable_text
 
     def _parse_user_base_info(self, html_text):
         html_text = self._prepare_html_text(html_text)
@@ -26,9 +38,18 @@ class GazelleSiteUserInfo(ISiteUserInfo):
         tmps = html.xpath('//*[@id="header-uploaded-value"]/@data-value')
         if tmps:
             self.upload = StringUtils.num_filesize(tmps[0])
+        else:
+            tmps = html.xpath('//li[@id="stats_seeding"]/span/text()')
+            if tmps:
+                self.upload = StringUtils.num_filesize(tmps[0])
+
         tmps = html.xpath('//*[@id="header-downloaded-value"]/@data-value')
         if tmps:
             self.download = StringUtils.num_filesize(tmps[0])
+        else:
+            tmps = html.xpath('//li[@id="stats_leeching"]/span/text()')
+            if tmps:
+                self.download = StringUtils.num_filesize(tmps[0])
 
         self.ratio = 0.0 if self.download <= 0.0 else round(self.upload / self.download, 3)
 
@@ -44,11 +65,6 @@ class GazelleSiteUserInfo(ISiteUserInfo):
                 bonus_match = re.search(r"([\d,.]+)", bonus_text)
                 if bonus_match and bonus_match.group(1).strip():
                     self.bonus = StringUtils.str_float(bonus_match.group(1))
-
-        logout = html.xpath('//a[contains(@href, "logout") or contains(@data-url, "logout")'
-                            ' or contains(@onclick, "logout")]')
-        if not logout:
-            self.err_msg = "未检测到已登陆，请检查cookies是否过期"
 
     def _parse_site_page(self, html_text):
         # TODO
@@ -68,11 +84,20 @@ class GazelleSiteUserInfo(ISiteUserInfo):
         user_levels_text = html.xpath('//*[@id="class-value"]/@data-value')
         if user_levels_text:
             self.user_level = user_levels_text[0].strip()
+        else:
+            user_levels_text = html.xpath('//li[contains(text(), "用户等级")]/text()')
+            if user_levels_text:
+                self.user_level = user_levels_text[0].split(':')[1].strip()
 
         # 加入日期
         join_at_text = html.xpath('//*[@id="join-date-value"]/@data-value')
         if join_at_text:
             self.join_at = StringUtils.unify_datetime_str(join_at_text[0].strip())
+        else:
+            join_at_text = html.xpath(
+                '//div[contains(@class, "box_userinfo_stats")]//li[contains(text(), "加入时间")]/span/text()')
+            if join_at_text:
+                self.join_at = StringUtils.unify_datetime_str(join_at_text[0].strip())
 
     def _parse_user_torrent_seeding_info(self, html_text, multi_page=False):
         """

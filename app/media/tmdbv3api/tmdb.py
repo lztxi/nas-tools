@@ -22,7 +22,7 @@ class TMDb(object):
     TMDB_CACHE_ENABLED = "TMDB_CACHE_ENABLED"
     TMDB_PROXIES = "TMDB_PROXIES"
     TMDB_DOMAIN = "TMDB_DOMAIN"
-    REQUEST_CACHE_MAXSIZE = 512
+    REQUEST_CACHE_MAXSIZE = 256
 
     def __init__(self, obj_cached=True, session=None):
         self._session = requests.Session() if session is None else session
@@ -30,7 +30,7 @@ class TMDb(object):
         self._reset = None
         self.obj_cached = obj_cached
         if os.environ.get(self.TMDB_LANGUAGE) is None:
-            os.environ[self.TMDB_LANGUAGE] = "en-US"
+            os.environ[self.TMDB_LANGUAGE] = "zh-CN"
         if not os.environ.get(self.TMDB_DOMAIN):
             os.environ[self.TMDB_DOMAIN] = "https://api.themoviedb.org/3"
 
